@@ -23,9 +23,12 @@ import android.widget.Toast
 import java.util.Date
 
 class MainActivity : Activity() {
+    private val blockerEngine = GenericBlockerEngine()
     private lateinit var settingsStore: SettingsStore
+    private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var domainText: TextView
+    private lateinit var profileButton: Button
     private lateinit var logText: TextView
     private lateinit var debugPanel: ScrollView
     private val events = ArrayDeque<BlockedEvent>()
@@ -34,17 +37,23 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settingsStore = SettingsStore(this)
+        activeProfile = SiteProfileRegistry.byId(settingsStore.selectedProfileId)
 
         webView = WebView(this)
-        WebViewConfigurator.configure(webView)
+        WebViewConfigurator.configure(webView, activeProfile)
 
-        val dataCleaner = SiteDataCleaner(webView, ::recordEvent)
+        val dataCleaner = SiteDataCleaner(
+            webView = webView,
+            blockerEngine = blockerEngine,
+            currentProfile = { activeProfile },
+            onEvent = ::recordEvent,
+        )
         val root = buildUi(dataCleaner)
         setContentView(root)
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onReceivedTitle(view: WebView, title: String?) {
-                domainText.text = title?.takeIf { it.isNotBlank() } ?: BlockerConfig.TargetHost
+                updateHeader(title)
             }
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
@@ -63,7 +72,7 @@ class MainActivity : Activity() {
                 resultMsg: Message?,
             ): Boolean {
                 if (settingsStore.blockerEnabled) {
-                    recordEvent(BlockedEvent("popup", "Blocked new-window request"))
+                    recordEvent(BlockedEvent("popup", "[${activeProfile.displayName}] Blocked new-window request"))
                     return false
                 }
                 return super.onCreateWindow(view, isDialog, isUserGesture, resultMsg)
@@ -73,12 +82,15 @@ class MainActivity : Activity() {
         webView.webViewClient = SiteShieldWebViewClient(
             context = this,
             settingsStore = settingsStore,
+            blockerEngine = blockerEngine,
+            currentProfile = { activeProfile },
+            onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
             onPageLoaded = ::injectDomCleanup,
         )
 
         if (savedInstanceState == null) {
-            webView.loadUrl(BlockerConfig.TargetUrl)
+            webView.loadUrl(activeProfile.startUrl)
         } else {
             webView.restoreState(savedInstanceState)
         }
@@ -89,6 +101,7 @@ class MainActivity : Activity() {
         super.onSaveInstanceState(outState)
     }
 
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         if (webView.canGoBack()) {
             webView.goBack()
@@ -113,7 +126,7 @@ class MainActivity : Activity() {
         }
 
         domainText = TextView(this).apply {
-            text = BlockerConfig.TargetHost
+            text = activeProfile.displayName
             textSize = 16f
             setTextColor(Color.rgb(17, 24, 39))
             setPadding(dp(12), dp(8), dp(12), dp(4))
@@ -132,6 +145,10 @@ class MainActivity : Activity() {
 
         val reloadButton = smallButton("Reload") {
             webView.reload()
+        }
+
+        profileButton = smallButton(activeProfile.displayName) {
+            showProfilePicker()
         }
 
         val blockerSwitch = Switch(this).apply {
@@ -161,7 +178,7 @@ class MainActivity : Activity() {
             }
         }
 
-        listOf(backButton, reloadButton, blockerSwitch, cleanButton, debugSwitch).forEach {
+        listOf(backButton, reloadButton, profileButton, blockerSwitch, cleanButton, debugSwitch).forEach {
             controls.addView(it)
         }
 
@@ -212,13 +229,51 @@ class MainActivity : Activity() {
         }
 
     private fun injectDomCleanup(view: WebView) {
-        val script = assets.open("dom_cleanup.js").bufferedReader().use { it.readText() }
+        val script = buildString {
+            append("window.__siteShieldDomConfig = ")
+            append(activeProfile.domRules.toJavascriptObject())
+            append(";\n")
+            append(assets.open("dom_cleanup.js").bufferedReader().use { it.readText() })
+        }
+        val profile = activeProfile
         view.evaluateJavascript(script) { result ->
             val removedCount = result?.filter { it.isDigit() }?.toIntOrNull() ?: 0
             if (removedCount > 0) {
-                recordEvent(BlockedEvent("dom", "Removed or neutralized $removedCount suspicious elements"))
+                recordEvent(BlockedEvent("dom", "[${profile.displayName}] Removed or neutralized $removedCount suspicious elements"))
             }
         }
+    }
+
+    private fun showProfilePicker() {
+        val profiles = SiteProfileRegistry.selectableProfiles()
+        val labels = profiles.map { it.displayName }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Site profile")
+            .setItems(labels) { _, index ->
+                val selected = profiles[index]
+                setActiveProfile(selected)
+                settingsStore.selectedProfileId = selected.id
+                recordEvent(BlockedEvent("profile", "Selected ${selected.displayName}"))
+                webView.loadUrl(selected.startUrl)
+            }
+            .show()
+    }
+
+    private fun setActiveProfile(profile: SiteProfile) {
+        if (::activeProfile.isInitialized && activeProfile.id == profile.id) return
+        activeProfile = profile
+        settingsStore.selectedProfileId = profile.id
+        WebViewConfigurator.applyCookiePolicy(webView, profile)
+        if (::profileButton.isInitialized) {
+            profileButton.text = profile.displayName
+        }
+        updateHeader(webView.title)
+        recordEvent(BlockedEvent("profile", "Active profile: ${profile.displayName}"))
+    }
+
+    private fun updateHeader(title: String?) {
+        val pageTitle = title?.takeIf { it.isNotBlank() } ?: activeProfile.startUrl.hostFromUrl().orEmpty()
+        domainText.text = "${activeProfile.displayName} - $pageTitle"
     }
 
     private fun recordEvent(event: BlockedEvent) {
@@ -251,3 +306,39 @@ class MainActivity : Activity() {
         private const val DOM_LOG_PREFIX = "[SiteShield]"
     }
 }
+
+private fun DomCleanupRules.toJavascriptObject(): String =
+    buildString {
+        append("{")
+        append("\"suspiciousSelectors\":")
+        append(suspiciousSelectors.toJavascriptArray())
+        append(",\"suspiciousClassTokens\":")
+        append(suspiciousClassTokens.toJavascriptArray())
+        append(",\"suspiciousUrlTokens\":")
+        append(suspiciousUrlTokens.toJavascriptArray())
+        append(",\"baitTextTokens\":")
+        append(baitTextTokens.toJavascriptArray())
+        append(",\"highZIndexThreshold\":")
+        append(highZIndexThreshold)
+        append(",\"overlayViewportCoverageThreshold\":")
+        append(overlayViewportCoverageThreshold)
+        append("}")
+    }
+
+private fun List<String>.toJavascriptArray(): String =
+    joinToString(prefix = "[", postfix = "]") { it.toJavascriptString() }
+
+private fun String.toJavascriptString(): String =
+    buildString {
+        append('"')
+        this@toJavascriptString.forEach { char ->
+            when (char) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                else -> append(char)
+            }
+        }
+        append('"')
+    }

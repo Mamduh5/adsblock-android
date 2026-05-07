@@ -1,17 +1,20 @@
 # Site Shield Mobile
 
-Native Kotlin Android app for a dedicated protected WebView around `https://example.com/`.
+Native Kotlin Android app for dedicated, profile-based protected WebView browsing. The current experimental profile opens `https://www.mangakakalot.gg/`, while the blocker architecture is built so more site profiles can be added later without scattering site-specific logic through the app.
 
 ## What v1 Includes
 
-- WebView-based in-app browser scoped to `example.com` and subdomains.
-- WebViewClient navigation blocking for suspicious schemes, hosts, and redirect-like paths.
-- Subresource interception for known ad, tracking, popup, redirect, and suspicious script hosts.
-- Local DOM cleanup script with MutationObserver for late overlays, high-z-index traps, deceptive bait buttons, and suspicious iframes.
-- Cookies stay enabled, while third-party cookies are disabled.
-- Manual suspicious site data cleanup for cookie, localStorage, and sessionStorage keys matching configured ad/popup/redirect/interstitial/promo/campaign patterns.
-- Local-only settings for blocker/debug toggles.
-- Debug panel, off by default, for blocked navigations, resources, DOM removals, and cleanup actions.
+- Multi-site `SiteProfile` model with site id, display name, start URL, allowed hosts, blocked hosts, suspicious URL tokens, cookie/storage key patterns, DOM cleanup rules, and per-site flags.
+- `MangakakalotProfile` as the first supported site profile.
+- `DefaultProfile` fallback for unknown sites.
+- `SiteProfileRegistry` for profile lookup and URL/host matching.
+- `GenericBlockerEngine` for reusable host classification, navigation decisions, resource blocking, and suspicious data-key checks.
+- WebView-based in-app browser with external-link confirmation.
+- WebViewClient navigation blocking and subresource interception.
+- Local DOM cleanup script with profile-provided selectors/tokens and MutationObserver for late overlays, fake buttons, click traps, and suspicious iframes.
+- Cookies stay enabled, while third-party cookies are profile-controlled and disabled by default.
+- Manual suspicious site data cleanup for cookie, localStorage, and sessionStorage keys matching the active profile.
+- Local-only blocker/debug/profile settings. No telemetry, analytics SDKs, remote rule loading, VPN, AccessibilityService, or JavaScript bridge.
 
 ## Run In Android Studio
 
@@ -20,31 +23,45 @@ Native Kotlin Android app for a dedicated protected WebView around `https://exam
 3. Use an Android emulator or device with internet access.
 4. Run the `app` configuration.
 
-The app opens `https://example.com/` by default. Update `BlockerConfig.TargetUrl` and `BlockerConfig.TargetHost` when replacing the placeholder with the real target site.
+The app defaults to `https://www.mangakakalot.gg/`.
 
-## Editable Local Config
+## Architecture
 
-Primary rules live in:
+- `SiteProfile.kt`: generic profile and DOM rule model.
+- `CommonRules.kt`: conservative reusable host, URL, data-key, and DOM heuristics.
+- `MangakakalotProfile.kt`: first experimental profile.
+- `DefaultProfile.kt`: generic fallback.
+- `SiteProfileRegistry.kt`: profile list and URL/host matching.
+- `GenericBlockerEngine.kt`: profile-driven blocker decisions.
+- `SiteShieldWebViewClient.kt`: WebView navigation/resource enforcement.
+- `SiteDataCleaner.kt`: profile-driven suspicious cookie/storage cleanup.
+- `dom_cleanup.js`: local DOM cleanup logic fed by active profile rules.
 
-- `app/src/main/java/com/example/siteshield/BlockerConfig.kt`
-- `app/src/main/assets/dom_cleanup.js`
+## Add Another Site
 
-Add suspicious hosts, URL path tokens, key patterns, or DOM heuristics there. No remote rule fetch, telemetry, analytics, or JavaScript bridge is used.
+1. Create a new file such as `SecondSiteProfile.kt`.
+2. Define a `SiteProfile` with `id`, `displayName`, `startUrl`, `allowedHosts`, and any extra blocked hosts/tokens/selectors.
+3. Add the profile to `SiteProfileRegistry.supportedProfiles`.
+4. Run local unit tests and a debug build.
+5. Tune selectors conservatively against the real site.
+
+Most new-site work should stay in the new profile file.
 
 ## Target Site Test Checklist
 
-- Load the target site and confirm normal login/session behavior still works.
-- Leave the page open long enough to trigger the delayed bad behavior.
-- Confirm suspicious main-frame redirects are blocked or opened externally only after confirmation.
-- Confirm obvious ad/popunder/redirect subresources appear in the debug panel when debug mode is enabled.
-- Confirm full-screen overlays, fake close buttons, deceptive continue/download/skip buttons, and suspicious iframes are removed or neutralized.
+- Load Mangakakalot and confirm normal browsing/reading still works.
+- Leave the page open long enough to trigger delayed ads or overlays.
+- Enable debug mode and verify logs include active profile, blocked navigation, blocked resources, DOM cleanup, and data cleanup.
+- Confirm suspicious redirects are blocked before leaving the page when detectable.
+- Confirm popups/new-window attempts are blocked with the blocker enabled.
+- Confirm obvious ad iframes, fake close buttons, overlay traps, and deceptive continue/download/skip elements are removed or neutralized.
 - Confirm the blocker toggle disables blocking for comparison.
-- Confirm suspicious site data cleanup does not remove normal auth/session cookies.
+- Run `Clean` and verify suspicious site data cleanup does not remove normal session state.
 
 ## Known Limitations
 
-- WebView cannot see or classify every browser-level behavior that Chrome exposes internally.
-- Request interception can block by URL/host, but it cannot inspect all response bodies.
-- DOM cleanup is heuristic and should be tuned against the real target site to avoid false positives.
-- Late DOM removals are logged through console messages captured by WebChromeClient, not a JavaScript bridge.
-- Device-wide VPN/DNS filtering is intentionally left as future work, not v1.
+- WebView cannot expose every browser-level signal available inside Chrome.
+- Request interception blocks by URL/host; it does not inspect all response bodies.
+- DOM cleanup is heuristic and needs careful tuning against live site behavior.
+- Fallback generic rules are intentionally conservative.
+- Device-wide VPN/DNS filtering is future work only, not v1.

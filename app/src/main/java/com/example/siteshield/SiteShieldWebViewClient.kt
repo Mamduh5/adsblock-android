@@ -15,24 +15,30 @@ import java.io.ByteArrayInputStream
 class SiteShieldWebViewClient(
     private val context: Context,
     private val settingsStore: SettingsStore,
+    private val blockerEngine: GenericBlockerEngine,
+    private val currentProfile: () -> SiteProfile,
+    private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (BlockedEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
 ) : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
+        val url = uri.toString()
+        val profile = blockerEngine.profileForUrl(url, currentProfile())
+        onProfileMatched(profile)
 
         if (!settingsStore.blockerEnabled) return false
 
-        if (BlockerConfig.isSuspiciousNavigation(uri)) {
-            onEvent(BlockedEvent("navigation", "Blocked navigation to ${uri.host ?: uri}"))
-            if (BlockerConfig.WarnOnSuspiciousNavigation) {
+        if (blockerEngine.isSuspiciousNavigation(profile, url)) {
+            onEvent(BlockedEvent("navigation", "[${profile.displayName}] Blocked navigation to ${uri.host ?: uri}"))
+            if (profile.warnOnSuspiciousNavigation) {
                 Toast.makeText(context, "Blocked suspicious navigation", Toast.LENGTH_SHORT).show()
             }
             return true
         }
 
-        if (BlockerConfig.isTargetHost(uri.host)) {
+        if (blockerEngine.isAllowedHost(profile, uri.host)) {
             return false
         }
 
@@ -51,9 +57,10 @@ class SiteShieldWebViewClient(
         if (!settingsStore.blockerEnabled || request.isForMainFrame) return null
 
         val uri = request.url
-        if (!BlockerConfig.isBlockedResource(uri)) return null
+        val profile = blockerEngine.profileForUrl(uri.toString(), currentProfile())
+        if (!blockerEngine.isBlockedResource(profile, uri.toString())) return null
 
-        onEvent(BlockedEvent("resource", "Blocked resource from ${uri.host ?: uri}"))
+        onEvent(BlockedEvent("resource", "[${profile.displayName}] Blocked resource from ${uri.host ?: uri}"))
         return WebResourceResponse(
             "text/plain",
             "utf-8",
@@ -66,7 +73,9 @@ class SiteShieldWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        onEvent(BlockedEvent("page", "Loading ${url.orEmpty()}"))
+        val profile = blockerEngine.profileForUrl(url, currentProfile())
+        onProfileMatched(profile)
+        onEvent(BlockedEvent("page", "[${profile.displayName}] Loading ${url.orEmpty()}"))
     }
 
     override fun onPageFinished(view: WebView, url: String?) {

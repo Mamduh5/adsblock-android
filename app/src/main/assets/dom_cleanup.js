@@ -4,10 +4,29 @@
   }
   window.__siteShieldInstalled = true;
 
-  const baitText = /^(continue|allow|download|skip|start|open|close|claim|accept|watch now|play now)$/i;
-  const suspiciousUrl = /(adserver|doubleclick|googlesyndication|googleadservices|taboola|outbrain|popads|propellerads|onclickads|adsterra|redirect|popunder|interstitial|campaign|promo)/i;
-  const suspiciousClass = /(overlay|modal|popup|popunder|interstitial|ad-|ads-|advert|banner|sponsor|redirect|clicktrap|fake-close|subscribe|campaign|promo)/i;
+  const config = window.__siteShieldDomConfig || {};
+  const suspiciousSelectors = Array.isArray(config.suspiciousSelectors) ? config.suspiciousSelectors : [];
+  const highZIndexThreshold = Number.isFinite(config.highZIndexThreshold) ? config.highZIndexThreshold : 999;
+  const overlayViewportCoverageThreshold = Number.isFinite(config.overlayViewportCoverageThreshold)
+    ? config.overlayViewportCoverageThreshold
+    : 0.28;
+  const baitText = tokenRegex(config.baitTextTokens, true);
+  const suspiciousUrl = tokenRegex(config.suspiciousUrlTokens, false);
+  const suspiciousClass = tokenRegex(config.suspiciousClassTokens, false);
   let removed = 0;
+
+  function tokenRegex(tokens, exact) {
+    const safeTokens = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
+    if (safeTokens.length === 0) {
+      return /$a/;
+    }
+    const source = safeTokens.map(escapeRegex).join("|");
+    return exact ? new RegExp("^(" + source + ")$", "i") : new RegExp("(" + source + ")", "i");
+  }
+
+  function escapeRegex(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
 
   function parseZIndex(value) {
     const parsed = Number.parseInt(value || "0", 10);
@@ -41,8 +60,8 @@
   function isSuspiciousOverlay(element, style, rect) {
     const position = style.position;
     const zIndex = parseZIndex(style.zIndex);
-    const highLayer = zIndex >= 999 || style.pointerEvents === "auto";
-    const coversMuch = viewportCoverage(rect) >= 0.28;
+    const highLayer = zIndex >= highZIndexThreshold || style.pointerEvents === "auto";
+    const coversMuch = viewportCoverage(rect) >= overlayViewportCoverageThreshold;
     const fixedOrSticky = position === "fixed" || position === "sticky";
     const idClass = `${element.id || ""} ${element.className || ""}`;
     return fixedOrSticky && highLayer && (coversMuch || suspiciousClass.test(idClass));
@@ -87,6 +106,15 @@
   function scan(root) {
     const scope = root && root.querySelectorAll ? root : document;
     scope.querySelectorAll("iframe, [class], [id], a, button, [role='button']").forEach(inspectElement);
+    for (const selector of suspiciousSelectors) {
+      try {
+        scope.querySelectorAll(selector).forEach(function(element) {
+          neutralize(element, "profile-selector");
+        });
+      } catch (error) {
+        console.info("[SiteShield] ignored invalid selector");
+      }
+    }
   }
 
   function blockClickTrap(event) {
