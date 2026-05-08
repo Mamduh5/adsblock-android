@@ -6,11 +6,13 @@
 
   const config = window.__siteShieldDomConfig || {};
   const suspiciousSelectors = Array.isArray(config.suspiciousSelectors) ? config.suspiciousSelectors : [];
+  const preserveSelectors = Array.isArray(config.preserveSelectors) ? config.preserveSelectors : [];
   const highZIndexThreshold = Number.isFinite(config.highZIndexThreshold) ? config.highZIndexThreshold : 999;
   const overlayViewportCoverageThreshold = Number.isFinite(config.overlayViewportCoverageThreshold)
     ? config.overlayViewportCoverageThreshold
     : 0.28;
   const baitText = tokenRegex(config.baitTextTokens, true);
+  const junkText = tokenRegex(config.junkTextTokens, false);
   const suspiciousUrl = tokenRegex(config.suspiciousUrlTokens, false);
   const suspiciousClass = tokenRegex(config.suspiciousClassTokens, false);
   let removed = 0;
@@ -39,8 +41,27 @@
     return elementArea / viewportArea;
   }
 
+  function isPreserved(element) {
+    if (!element || preserveSelectors.length === 0) {
+      return false;
+    }
+    for (const selector of preserveSelectors) {
+      try {
+        if (element.matches(selector) || element.querySelector(selector)) {
+          return true;
+        }
+      } catch (error) {
+        console.info("[SiteShield] ignored invalid preserve selector");
+      }
+    }
+    return false;
+  }
+
   function neutralize(element, reason) {
     if (!element || element === document.documentElement || element === document.body) {
+      return;
+    }
+    if (isPreserved(element)) {
       return;
     }
     element.setAttribute("data-site-shield-removed", reason);
@@ -80,8 +101,32 @@
     return looksClickable && (suspiciousClass.test(idClass) || suspiciousUrl.test(href));
   }
 
+  function isKnownJunkText(element) {
+    const text = (element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    if (!junkText.test(text)) {
+      return false;
+    }
+    const idClass = `${element.id || ""} ${element.className || ""}`;
+    const parentClass = element.parentElement ? `${element.parentElement.id || ""} ${element.parentElement.className || ""}` : "";
+    return suspiciousClass.test(idClass) || suspiciousClass.test(parentClass);
+  }
+
+  function removeEmptySuspiciousWrapper(element) {
+    const idClass = `${element.id || ""} ${element.className || ""}`;
+    if (!suspiciousClass.test(idClass) || isPreserved(element)) {
+      return;
+    }
+    const hasUsefulContent = element.querySelector("img, picture, source, select, input, textarea, video, canvas, a[href*='chapter']");
+    if (!hasUsefulContent && (element.textContent || "").trim().length < 24) {
+      neutralize(element, "empty-suspicious-wrapper");
+    }
+  }
+
   function inspectElement(element) {
     if (!(element instanceof HTMLElement)) {
+      return;
+    }
+    if (isPreserved(element)) {
       return;
     }
 
@@ -100,7 +145,15 @@
 
     if (isDeceptiveBait(element, style)) {
       neutralize(element, "deceptive-bait");
+      return;
     }
+
+    if (isKnownJunkText(element)) {
+      neutralize(element, "known-junk-text");
+      return;
+    }
+
+    removeEmptySuspiciousWrapper(element);
   }
 
   function scan(root) {

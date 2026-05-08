@@ -31,9 +31,13 @@ class SiteDataCleaner(
         val storagePatterns = profile.suspiciousStorageKeyPatterns.joinToString("|") {
             it.pattern
         }.ifBlank { "(?!)" }
+        val protectedStoragePatterns = profile.protectedStorageKeyPatterns.joinToString("|") {
+            it.pattern
+        }.ifBlank { "(?!)" }
         val cleanupScript = """
             (function() {
               const pattern = new RegExp(${storagePatterns.toJavascriptString()}, 'i');
+              const protectedPattern = new RegExp(${protectedStoragePatterns.toJavascriptString()}, 'i');
               const stores = [window.localStorage, window.sessionStorage].filter(Boolean);
               const removed = [];
               for (const store of stores) {
@@ -42,7 +46,7 @@ class SiteDataCleaner(
                   keys.push(store.key(i));
                 }
                 keys.filter(Boolean).forEach(function(key) {
-                  if (pattern.test(key)) {
+                  if (pattern.test(key) && !protectedPattern.test(key)) {
                     store.removeItem(key);
                     removed.push(key);
                   }

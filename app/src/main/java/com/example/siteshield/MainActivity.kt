@@ -229,9 +229,11 @@ class MainActivity : Activity() {
         }
 
     private fun injectDomCleanup(view: WebView) {
+        val pageUrl = view.url ?: activeProfile.startUrl
+        val domRules = blockerEngine.domRulesForUrl(activeProfile, pageUrl)
         val script = buildString {
             append("window.__siteShieldDomConfig = ")
-            append(activeProfile.domRules.toJavascriptObject())
+            append(domRules.toJavascriptObject())
             append(";\n")
             append(assets.open("dom_cleanup.js").bufferedReader().use { it.readText() })
         }
@@ -312,12 +314,16 @@ private fun DomCleanupRules.toJavascriptObject(): String =
         append("{")
         append("\"suspiciousSelectors\":")
         append(suspiciousSelectors.toJavascriptArray())
+        append(",\"preserveSelectors\":")
+        append(preserveSelectors.toJavascriptArray())
         append(",\"suspiciousClassTokens\":")
         append(suspiciousClassTokens.toJavascriptArray())
         append(",\"suspiciousUrlTokens\":")
         append(suspiciousUrlTokens.toJavascriptArray())
         append(",\"baitTextTokens\":")
         append(baitTextTokens.toJavascriptArray())
+        append(",\"junkTextTokens\":")
+        append(junkTextTokens.toJavascriptArray())
         append(",\"highZIndexThreshold\":")
         append(highZIndexThreshold)
         append(",\"overlayViewportCoverageThreshold\":")

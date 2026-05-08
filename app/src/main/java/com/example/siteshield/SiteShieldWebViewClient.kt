@@ -30,7 +30,8 @@ class SiteShieldWebViewClient(
 
         if (!settingsStore.blockerEnabled) return false
 
-        if (blockerEngine.isSuspiciousNavigation(profile, url)) {
+        val currentPageUrl = view.url
+        if (blockerEngine.isSuspiciousNavigation(profile, url, currentPageUrl, request.isForMainFrame)) {
             onEvent(BlockedEvent("navigation", "[${profile.displayName}] Blocked navigation to ${uri.host ?: uri}"))
             if (profile.warnOnSuspiciousNavigation) {
                 Toast.makeText(context, "Blocked suspicious navigation", Toast.LENGTH_SHORT).show()
@@ -42,7 +43,7 @@ class SiteShieldWebViewClient(
             return false
         }
 
-        if (request.isForMainFrame) {
+        if (request.isForMainFrame && blockerEngine.shouldPromptForOffsiteMainFrameNavigation(profile, url, currentPageUrl)) {
             promptExternalOpen(uri)
             return true
         }
@@ -58,7 +59,7 @@ class SiteShieldWebViewClient(
 
         val uri = request.url
         val profile = blockerEngine.profileForUrl(uri.toString(), currentProfile())
-        if (!blockerEngine.isBlockedResource(profile, uri.toString())) return null
+        if (!blockerEngine.isBlockedResource(profile, uri.toString(), view.url)) return null
 
         onEvent(BlockedEvent("resource", "[${profile.displayName}] Blocked resource from ${uri.host ?: uri}"))
         return WebResourceResponse(

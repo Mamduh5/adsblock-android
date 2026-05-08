@@ -4,7 +4,8 @@ Native Kotlin Android app for dedicated, profile-based protected WebView browsin
 
 ## What v1 Includes
 
-- Multi-site `SiteProfile` model with site id, display name, start URL, allowed hosts, blocked hosts, suspicious URL tokens, cookie/storage key patterns, DOM cleanup rules, and per-site flags.
+- Multi-site `SiteProfile` model with site id, display name, start URL, allowed hosts, page-type classifiers, baseline policy, page-type overrides, cookie/storage key patterns, and per-site flags.
+- Reusable `PagePolicy` and `RequestRule` models for host, path, query-token, URL-token, first-party loader, navigation, resource, and DOM cleanup decisions.
 - `MangakakalotProfile` as the first supported site profile.
 - `DefaultProfile` fallback for unknown sites.
 - `SiteProfileRegistry` for profile lookup and URL/host matching.
@@ -27,12 +28,12 @@ The app defaults to `https://www.mangakakalot.gg/`.
 
 ## Architecture
 
-- `SiteProfile.kt`: generic profile and DOM rule model.
+- `SiteProfile.kt`: generic profile, page-type, request-rule, policy, and DOM cleanup model.
 - `CommonRules.kt`: conservative reusable host, URL, data-key, and DOM heuristics.
 - `MangakakalotProfile.kt`: first experimental profile.
 - `DefaultProfile.kt`: generic fallback.
 - `SiteProfileRegistry.kt`: profile list and URL/host matching.
-- `GenericBlockerEngine.kt`: profile-driven blocker decisions.
+- `GenericBlockerEngine.kt`: profile and page-type-driven blocker decisions.
 - `SiteShieldWebViewClient.kt`: WebView navigation/resource enforcement.
 - `SiteDataCleaner.kt`: profile-driven suspicious cookie/storage cleanup.
 - `dom_cleanup.js`: local DOM cleanup logic fed by active profile rules.
@@ -40,7 +41,7 @@ The app defaults to `https://www.mangakakalot.gg/`.
 ## Add Another Site
 
 1. Create a new file such as `SecondSiteProfile.kt`.
-2. Define a `SiteProfile` with `id`, `displayName`, `startUrl`, `allowedHosts`, and any extra blocked hosts/tokens/selectors.
+2. Define a `SiteProfile` with `id`, `displayName`, `startUrl`, `allowedHosts`, page-type rules, baseline policy, and any page-type overrides.
 3. Add the profile to `SiteProfileRegistry.supportedProfiles`.
 4. Run local unit tests and a debug build.
 5. Tune selectors conservatively against the real site.

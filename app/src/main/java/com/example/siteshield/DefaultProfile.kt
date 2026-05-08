@@ -6,11 +6,15 @@ object DefaultProfile {
         displayName = "Generic Shield",
         startUrl = "https://www.mangakakalot.gg/",
         allowedHosts = emptyList(),
-        blockedHosts = CommonRules.blockedHosts,
-        suspiciousHostTokens = CommonRules.suspiciousHostTokens,
-        suspiciousUrlTokens = CommonRules.suspiciousUrlTokens,
+        baselinePolicy = PagePolicy(
+            blockedHosts = CommonRules.blockedHosts,
+            suspiciousHostTokens = CommonRules.suspiciousHostTokens,
+            suspiciousUrlTokens = CommonRules.suspiciousUrlTokens,
+            domRules = CommonRules.domRules,
+        ),
         suspiciousCookieKeyPatterns = listOf(suspiciousKeyRegex()),
         suspiciousStorageKeyPatterns = listOf(suspiciousKeyRegex()),
-        domRules = CommonRules.domRules,
+        protectedCookieKeyPatterns = listOf(protectedAccountKeyRegex()),
+        protectedStorageKeyPatterns = listOf(protectedAccountKeyRegex()),
     )
 }
