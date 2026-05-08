@@ -18,7 +18,7 @@ class SiteShieldWebViewClient(
     private val blockerEngine: GenericBlockerEngine,
     private val currentProfile: () -> SiteProfile,
     private val onProfileMatched: (SiteProfile) -> Unit,
-    private val onEvent: (BlockedEvent) -> Unit,
+    private val onEvent: (DebugEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
 ) : WebViewClient() {
 
@@ -32,7 +32,15 @@ class SiteShieldWebViewClient(
 
         val currentPageUrl = view.url
         if (blockerEngine.isSuspiciousNavigation(profile, url, currentPageUrl, request.isForMainFrame)) {
-            onEvent(BlockedEvent("navigation", "[${profile.displayName}] Blocked navigation to ${uri.host ?: uri}"))
+            val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
+            val matchedRule = blockerEngine.matchingRequestRule(profile, url, currentPageUrl, request.isForMainFrame)
+            onEvent(
+                DebugEvent(
+                    category = DebugEventCategory.NAV_BLOCK,
+                    message = "[${profile.displayName}] Blocked main-frame=${request.isForMainFrame} navigation to ${uri.host ?: uri}",
+                    detail = "pageType=$pageType, matchedRule=${matchedRule?.id ?: "policy"}, url=$url",
+                ),
+            )
             if (profile.warnOnSuspiciousNavigation) {
                 Toast.makeText(context, "Blocked suspicious navigation", Toast.LENGTH_SHORT).show()
             }
@@ -61,7 +69,15 @@ class SiteShieldWebViewClient(
         val profile = blockerEngine.profileForUrl(uri.toString(), currentProfile())
         if (!blockerEngine.isBlockedResource(profile, uri.toString(), view.url)) return null
 
-        onEvent(BlockedEvent("resource", "[${profile.displayName}] Blocked resource from ${uri.host ?: uri}"))
+        val pageType = blockerEngine.classifyPageType(profile, view.url)
+        val matchedRule = blockerEngine.matchingRequestRule(profile, uri.toString(), view.url, isMainFrame = false)
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.RESOURCE_BLOCK,
+                message = "[${profile.displayName}] Blocked subresource from ${uri.host ?: uri}",
+                detail = "pageType=$pageType, matchedRule=${matchedRule?.id ?: "policy"}, url=${uri}",
+            ),
+        )
         return WebResourceResponse(
             "text/plain",
             "utf-8",
@@ -76,7 +92,21 @@ class SiteShieldWebViewClient(
         super.onPageStarted(view, url, favicon)
         val profile = blockerEngine.profileForUrl(url, currentProfile())
         onProfileMatched(profile)
-        onEvent(BlockedEvent("page", "[${profile.displayName}] Loading ${url.orEmpty()}"))
+        val pageType = blockerEngine.classifyPageType(profile, url)
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.PAGE_TYPE,
+                message = "[${profile.displayName}] Loading ${url.orEmpty()}",
+                detail = "detected=$pageType",
+            ),
+        )
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.POLICY_DECISION,
+                message = "Active merged policy",
+                detail = blockerEngine.describePolicy(profile, pageType),
+            ),
+        )
     }
 
     override fun onPageFinished(view: WebView, url: String?) {

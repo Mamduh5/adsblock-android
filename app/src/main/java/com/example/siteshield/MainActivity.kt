@@ -2,11 +2,13 @@ package com.example.siteshield
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Looper
 import android.os.Message
-import android.text.format.DateFormat
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -20,7 +22,6 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import java.util.Date
 
 class MainActivity : Activity() {
     private val blockerEngine = GenericBlockerEngine()
@@ -31,7 +32,11 @@ class MainActivity : Activity() {
     private lateinit var profileButton: Button
     private lateinit var logText: TextView
     private lateinit var debugPanel: ScrollView
-    private val events = ArrayDeque<BlockedEvent>()
+    private lateinit var debugTools: LinearLayout
+    private lateinit var markerText: TextView
+    private lateinit var filterButton: Button
+    private val eventLog = DebugEventLog(MAX_EVENTS)
+    private var debugFilter: DebugEventCategory? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,6 +55,13 @@ class MainActivity : Activity() {
         )
         val root = buildUi(dataCleaner)
         setContentView(root)
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.PROFILE,
+                message = "Active profile: ${activeProfile.displayName}",
+                detail = "id=${activeProfile.id}",
+            ),
+        )
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onReceivedTitle(view: WebView, title: String?) {
@@ -59,7 +71,12 @@ class MainActivity : Activity() {
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                 val message = consoleMessage.message()
                 if (message.startsWith(DOM_LOG_PREFIX)) {
-                    recordEvent(BlockedEvent("dom", message.removePrefix(DOM_LOG_PREFIX).trim()))
+                    recordEvent(
+                        DebugEvent(
+                            category = DebugEventCategory.DOM_CLEANUP,
+                            message = message.removePrefix(DOM_LOG_PREFIX).trim(),
+                        ),
+                    )
                     return true
                 }
                 return super.onConsoleMessage(consoleMessage)
@@ -72,7 +89,13 @@ class MainActivity : Activity() {
                 resultMsg: Message?,
             ): Boolean {
                 if (settingsStore.blockerEnabled) {
-                    recordEvent(BlockedEvent("popup", "[${activeProfile.displayName}] Blocked new-window request"))
+                    recordEvent(
+                        DebugEvent(
+                            category = DebugEventCategory.NAV_BLOCK,
+                            message = "[${activeProfile.displayName}] Blocked new-window request",
+                            detail = "WebChromeClient.onCreateWindow",
+                        ),
+                    )
                     return false
                 }
                 return super.onCreateWindow(view, isDialog, isUserGesture, resultMsg)
@@ -147,6 +170,10 @@ class MainActivity : Activity() {
             webView.reload()
         }
 
+        val cleanupButton = smallButton("Cleanup") {
+            injectDomCleanup(webView)
+        }
+
         profileButton = smallButton(activeProfile.displayName) {
             showProfilePicker()
         }
@@ -157,12 +184,17 @@ class MainActivity : Activity() {
             isChecked = settingsStore.blockerEnabled
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.blockerEnabled = enabled
-                recordEvent(BlockedEvent("setting", "Blocker ${if (enabled) "enabled" else "disabled"}"))
+                recordEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.POLICY_DECISION,
+                        message = "Blocker ${if (enabled) "enabled" else "disabled"}",
+                    ),
+                )
                 if (enabled) injectDomCleanup(webView)
             }
         }
 
-        val cleanButton = smallButton("Clean") {
+        val dataCleanButton = smallButton("Data") {
             dataCleaner.cleanSuspiciousSiteData()
             Toast.makeText(this, "Suspicious site data cleanup ran", Toast.LENGTH_SHORT).show()
         }
@@ -174,12 +206,45 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.debugEnabled = enabled
                 debugPanel.visibility = if (enabled) View.VISIBLE else View.GONE
+                debugTools.visibility = if (enabled) View.VISIBLE else View.GONE
                 updateDebugLog()
             }
         }
 
-        listOf(backButton, reloadButton, profileButton, blockerSwitch, cleanButton, debugSwitch).forEach {
+        listOf(backButton, reloadButton, cleanupButton, profileButton, blockerSwitch, dataCleanButton, debugSwitch).forEach {
             controls.addView(it)
+        }
+
+        markerText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(dp(12), 0, dp(12), dp(4))
+            maxLines = 3
+        }
+
+        debugTools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        }
+
+        val clearLogButton = smallButton("Clear") {
+            eventLog.clear()
+            updateDebugLog()
+            updateRuntimeMarkers()
+        }
+
+        val copyLogButton = smallButton("Copy") {
+            copyDebugLog()
+        }
+
+        filterButton = smallButton("Filter: All") {
+            cycleDebugFilter()
+        }
+
+        listOf(clearLogButton, copyLogButton, filterButton).forEach {
+            debugTools.addView(it)
         }
 
         debugPanel = ScrollView(this).apply {
@@ -187,7 +252,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(243, 244, 246))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(136),
+                dp(160),
             )
         }
 
@@ -211,8 +276,11 @@ class MainActivity : Activity() {
 
         root.addView(domainText)
         root.addView(controlScroller)
+        root.addView(markerText)
+        root.addView(debugTools)
         root.addView(debugPanel)
         root.addView(webView)
+        updateRuntimeMarkers()
         return root
     }
 
@@ -230,7 +298,15 @@ class MainActivity : Activity() {
 
     private fun injectDomCleanup(view: WebView) {
         val pageUrl = view.url ?: activeProfile.startUrl
+        val pageType = blockerEngine.classifyPageType(activeProfile, pageUrl)
         val domRules = blockerEngine.domRulesForUrl(activeProfile, pageUrl)
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.DOM_CLEANUP,
+                message = "[${activeProfile.displayName}] Reader cleanup requested",
+                detail = "pageType=$pageType, url=$pageUrl",
+            ),
+        )
         val script = buildString {
             append("window.__siteShieldDomConfig = ")
             append(domRules.toJavascriptObject())
@@ -239,10 +315,14 @@ class MainActivity : Activity() {
         }
         val profile = activeProfile
         view.evaluateJavascript(script) { result ->
-            val removedCount = result?.filter { it.isDigit() }?.toIntOrNull() ?: 0
-            if (removedCount > 0) {
-                recordEvent(BlockedEvent("dom", "[${profile.displayName}] Removed or neutralized $removedCount suspicious elements"))
-            }
+            val cleanupResult = decodeJavascriptString(result)
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DOM_CLEANUP,
+                    message = "[${profile.displayName}] Reader cleanup ran",
+                    detail = cleanupResult.ifBlank { "removed=0" },
+                ),
+            )
         }
     }
 
@@ -255,7 +335,13 @@ class MainActivity : Activity() {
                 val selected = profiles[index]
                 setActiveProfile(selected)
                 settingsStore.selectedProfileId = selected.id
-                recordEvent(BlockedEvent("profile", "Selected ${selected.displayName}"))
+                recordEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.PROFILE,
+                        message = "Selected ${selected.displayName}",
+                        detail = "id=${selected.id}",
+                    ),
+                )
                 webView.loadUrl(selected.startUrl)
             }
             .show()
@@ -270,24 +356,32 @@ class MainActivity : Activity() {
             profileButton.text = profile.displayName
         }
         updateHeader(webView.title)
-        recordEvent(BlockedEvent("profile", "Active profile: ${profile.displayName}"))
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.PROFILE,
+                message = "Active profile: ${profile.displayName}",
+                detail = "id=${profile.id}",
+            ),
+        )
+        updateRuntimeMarkers()
     }
 
     private fun updateHeader(title: String?) {
         val pageTitle = title?.takeIf { it.isNotBlank() } ?: activeProfile.startUrl.hostFromUrl().orEmpty()
-        domainText.text = "${activeProfile.displayName} - $pageTitle"
+        val pageType = blockerEngine.classifyPageType(activeProfile, webView.url ?: activeProfile.startUrl)
+        val strictMarker = if (pageType == PageType.CHAPTER_READER) " [CHAPTER STRICT]" else ""
+        domainText.text = "${activeProfile.displayName}$strictMarker - $pageTitle"
+        updateRuntimeMarkers()
     }
 
-    private fun recordEvent(event: BlockedEvent) {
+    private fun recordEvent(event: DebugEvent) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             runOnUiThread { recordEvent(event) }
             return
         }
 
-        events.addFirst(event)
-        while (events.size > MAX_EVENTS) {
-            events.removeLast()
-        }
+        eventLog.add(event)
+        updateRuntimeMarkers()
 
         if (settingsStore.debugEnabled) {
             updateDebugLog()
@@ -295,10 +389,53 @@ class MainActivity : Activity() {
     }
 
     private fun updateDebugLog() {
-        logText.text = events.joinToString(separator = "\n") { event ->
-            val time = DateFormat.format("HH:mm:ss", Date(event.timestampMs))
-            "$time ${event.type}: ${event.message}"
+        logText.text = eventLog.format(debugFilter)
+    }
+
+    private fun updateRuntimeMarkers() {
+        if (!::markerText.isInitialized || !::activeProfile.isInitialized || !::webView.isInitialized) return
+        val pageUrl = webView.url ?: activeProfile.startUrl
+        val pageType = blockerEngine.classifyPageType(activeProfile, pageUrl)
+        val policy = blockerEngine.policyForUrl(activeProfile, pageUrl)
+        val recent = eventLog.snapshot()
+        val navDenied = recent.any { it.category == DebugEventCategory.NAV_BLOCK }
+        val cleanupRan = recent.any {
+            it.category == DebugEventCategory.DOM_CLEANUP && it.message.contains("cleanup ran", ignoreCase = true)
         }
+        val storageRan = recent.any {
+            it.category == DebugEventCategory.STORAGE_CLEANUP || it.category == DebugEventCategory.COOKIE_CLEANUP
+        }
+        markerText.text = "Profile=${activeProfile.id} PageType=$pageType StrictChapter=${pageType == PageType.CHAPTER_READER && policy.blockOffsiteMainFrameNavigations} " +
+            "OffsiteNavDenied=$navDenied ReaderCleanupRan=$cleanupRan StorageCleanupRan=$storageRan"
+    }
+
+    private fun copyDebugLog() {
+        val text = eventLog.format(debugFilter)
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("SiteShield debug log", text))
+        Toast.makeText(this, "Debug log copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun cycleDebugFilter() {
+        val options = listOf<DebugEventCategory?>(null) + DebugEventCategory.entries
+        val nextIndex = (options.indexOf(debugFilter) + 1).floorMod(options.size)
+        debugFilter = options[nextIndex]
+        filterButton.text = "Filter: ${debugFilter?.name ?: "All"}"
+        updateDebugLog()
+    }
+
+    private fun Int.floorMod(divisor: Int): Int {
+        val remainder = this % divisor
+        return if (remainder >= 0) remainder else remainder + divisor
+    }
+
+    private fun decodeJavascriptString(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") return ""
+        return raw
+            .removeSurrounding("\"")
+            .replace("\\n", "\n")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

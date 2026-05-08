@@ -1,9 +1,4 @@
 (function siteShieldDomCleanup() {
-  if (window.__siteShieldInstalled) {
-    return 0;
-  }
-  window.__siteShieldInstalled = true;
-
   const config = window.__siteShieldDomConfig || {};
   const suspiciousSelectors = Array.isArray(config.suspiciousSelectors) ? config.suspiciousSelectors : [];
   const preserveSelectors = Array.isArray(config.preserveSelectors) ? config.preserveSelectors : [];
@@ -16,6 +11,7 @@
   const suspiciousUrl = tokenRegex(config.suspiciousUrlTokens, false);
   const suspiciousClass = tokenRegex(config.suspiciousClassTokens, false);
   let removed = 0;
+  const removedFamilies = {};
 
   function tokenRegex(tokens, exact) {
     const safeTokens = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
@@ -69,7 +65,8 @@
     element.style.setProperty("pointer-events", "none", "important");
     element.remove();
     removed += 1;
-    console.info("[SiteShield] removed " + reason);
+    removedFamilies[reason] = (removedFamilies[reason] || 0) + 1;
+    console.info("[SiteShield] dom family=" + reason + " removed=1");
   }
 
   function isSuspiciousFrame(element) {
@@ -162,7 +159,7 @@
     for (const selector of suspiciousSelectors) {
       try {
         scope.querySelectorAll(selector).forEach(function(element) {
-          neutralize(element, "profile-selector");
+          neutralize(element, "profile-selector:" + selector);
         });
       } catch (error) {
         console.info("[SiteShield] ignored invalid selector");
@@ -183,29 +180,40 @@
       event.preventDefault();
       event.stopPropagation();
       removed += 1;
-      console.info("[SiteShield] blocked suspicious click target");
+      removedFamilies["suspicious-click-target"] = (removedFamilies["suspicious-click-target"] || 0) + 1;
+      console.info("[SiteShield] dom family=suspicious-click-target blocked=1");
     }
   }
 
   scan(document);
 
-  const observer = new MutationObserver(function(mutations) {
-    for (const mutation of mutations) {
-      mutation.addedNodes.forEach(function(node) {
-        if (node instanceof HTMLElement) {
-          inspectElement(node);
-          scan(node);
-        }
-      });
-    }
-  });
+  if (!window.__siteShieldInstalled) {
+    const observer = new MutationObserver(function(mutations) {
+      for (const mutation of mutations) {
+        mutation.addedNodes.forEach(function(node) {
+          if (node instanceof HTMLElement) {
+            inspectElement(node);
+            scan(node);
+          }
+        });
+      }
+    });
 
-  observer.observe(document.documentElement, {
-    childList: true,
-    subtree: true
-  });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
 
-  document.addEventListener("click", blockClickTrap, true);
+    document.addEventListener("click", blockClickTrap, true);
+    window.__siteShieldInstalled = true;
+  }
 
-  return removed;
+  const familySummary = Object.keys(removedFamilies)
+    .sort()
+    .map(function(key) {
+      return key + ":" + removedFamilies[key];
+    })
+    .join(",");
+
+  return "removed=" + removed + "; families=" + (familySummary || "none");
 })();

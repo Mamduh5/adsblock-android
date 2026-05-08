@@ -32,6 +32,14 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
     fun domRulesForUrl(profile: SiteProfile, url: String?): DomCleanupRules =
         policyForUrl(profile, url).domRules
 
+    fun describePolicy(profile: SiteProfile, pageType: PageType): String {
+        val policy = policyForPageType(profile, pageType)
+        return "profile=${profile.id}, pageType=$pageType, blockedHosts=${policy.blockedHosts.size}, " +
+            "hostTokens=${policy.suspiciousHostTokens.size}, urlTokens=${policy.suspiciousUrlTokens.size}, " +
+            "requestRules=${policy.requestRules.size}, offsiteMainFrameDenied=${policy.blockOffsiteMainFrameNavigations}, " +
+            "offsitePrompt=${policy.promptForOffsiteMainFrameNavigations}"
+    }
+
     fun isBlockedHost(profile: SiteProfile, host: String?, pageType: PageType = PageType.UNKNOWN): Boolean {
         val normalizedHost = host.normalizedHost() ?: return false
         val policy = policyForPageType(profile, pageType)
@@ -51,7 +59,7 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
 
         val currentPageType = classifyPageType(profile, currentPageUrl)
         val policy = policyForPageType(profile, currentPageType)
-        if (policy.requestRules.any { it.matches(url, profile, isMainFrame) }) return true
+        if (matchingRequestRule(profile, url, currentPageUrl, isMainFrame) != null) return true
         if (isBlockedHost(profile, parsed.host, currentPageType)) return true
         if (containsSuspiciousUrlToken(policy, url)) return true
 
@@ -66,18 +74,40 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
         if (scheme !in setOf("http", "https")) return false
         val currentPageType = classifyPageType(profile, currentPageUrl ?: url)
         val policy = policyForPageType(profile, currentPageType)
-        if (policy.requestRules.any { it.matches(url, profile, isMainFrame = false) }) return true
+        if (matchingRequestRule(profile, url, currentPageUrl ?: url, isMainFrame = false) != null) return true
         if (isBlockedHost(profile, parsed.host, currentPageType)) return true
         return containsSuspiciousUrlToken(policy, url)
     }
 
+    fun matchingRequestRule(
+        profile: SiteProfile,
+        url: String,
+        currentPageUrl: String?,
+        isMainFrame: Boolean,
+    ): RequestRule? {
+        val pageType = classifyPageType(profile, currentPageUrl ?: url)
+        return policyForPageType(profile, pageType)
+            .requestRules
+            .firstOrNull { it.matches(url, profile, isMainFrame) }
+    }
+
+    fun matchingSuspiciousCookiePattern(profile: SiteProfile, key: String): Regex? =
+        profile.suspiciousCookieKeyPatterns.firstOrNull { suspiciousPattern ->
+            suspiciousPattern.containsMatchIn(key) &&
+                profile.protectedCookieKeyPatterns.none { it.containsMatchIn(key) }
+        }
+
+    fun matchingSuspiciousStoragePattern(profile: SiteProfile, key: String): Regex? =
+        profile.suspiciousStorageKeyPatterns.firstOrNull { suspiciousPattern ->
+            suspiciousPattern.containsMatchIn(key) &&
+                profile.protectedStorageKeyPatterns.none { it.containsMatchIn(key) }
+        }
+
     fun isSuspiciousCookieKey(profile: SiteProfile, key: String): Boolean =
-        profile.protectedCookieKeyPatterns.none { it.containsMatchIn(key) } &&
-            profile.suspiciousCookieKeyPatterns.any { it.containsMatchIn(key) }
+        matchingSuspiciousCookiePattern(profile, key) != null
 
     fun isSuspiciousStorageKey(profile: SiteProfile, key: String): Boolean =
-        profile.protectedStorageKeyPatterns.none { it.containsMatchIn(key) } &&
-            profile.suspiciousStorageKeyPatterns.any { it.containsMatchIn(key) }
+        matchingSuspiciousStoragePattern(profile, key) != null
 
     fun shouldPromptForOffsiteMainFrameNavigation(
         profile: SiteProfile,

@@ -7,7 +7,7 @@ class SiteDataCleaner(
     private val webView: WebView,
     private val blockerEngine: GenericBlockerEngine,
     private val currentProfile: () -> SiteProfile,
-    private val onEvent: (BlockedEvent) -> Unit,
+    private val onEvent: (DebugEvent) -> Unit,
 ) {
     fun cleanSuspiciousSiteData() {
         val profile = currentProfile()
@@ -19,11 +19,20 @@ class SiteDataCleaner(
             .map { it.trim() }
             .filter { it.contains('=') }
             .map { it.substringBefore('=').trim() }
-            .filter { it.isNotBlank() && blockerEngine.isSuspiciousCookieKey(profile, it) }
+            .mapNotNull { cookieName ->
+                blockerEngine.matchingSuspiciousCookiePattern(profile, cookieName)
+                    ?.let { pattern -> cookieName to pattern }
+            }
             .forEach { cookieName ->
-                expireCookie(cookieManager, profile, cookieName)
+                expireCookie(cookieManager, profile, cookieName.first)
                 removedCookies += 1
-                onEvent(BlockedEvent("cookie", "[${profile.displayName}] Removed suspicious cookie: $cookieName"))
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.COOKIE_CLEANUP,
+                        message = "[${profile.displayName}] Removed suspicious cookie: ${cookieName.first}",
+                        detail = "matchedPattern=${cookieName.second.pattern}",
+                    ),
+                )
             }
 
         cookieManager.flush()
@@ -64,11 +73,24 @@ class SiteDataCleaner(
                 .toList()
 
             storageKeys.forEach {
-                onEvent(BlockedEvent("storage", "[${profile.displayName}] Removed suspicious storage key: $it"))
+                val matchedPattern = blockerEngine.matchingSuspiciousStoragePattern(profile, it)
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.STORAGE_CLEANUP,
+                        message = "[${profile.displayName}] Removed suspicious storage key: $it",
+                        detail = "matchedPattern=${matchedPattern?.pattern ?: "js-pattern"}",
+                    ),
+                )
             }
 
             if (removedCookies == 0 && storageKeys.isEmpty()) {
-                onEvent(BlockedEvent("clean", "[${profile.displayName}] No suspicious site data matched configured patterns"))
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.STORAGE_CLEANUP,
+                        message = "[${profile.displayName}] Suspicious site data cleanup ran",
+                        detail = "removedCookies=0, removedStorageKeys=0",
+                    ),
+                )
             }
         }
     }

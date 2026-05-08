@@ -81,6 +81,18 @@ class GenericBlockerEngineTest {
     }
 
     @Test
+    fun `matched request rule is reportable for debug logging`() {
+        val matchedRule = engine.matchingRequestRule(
+            profile,
+            "https://oundhertobeconsist.org/floater",
+            currentPageUrl = "https://www.mangakakalot.gg/chapter/example/chapter-1",
+            isMainFrame = false,
+        )
+
+        assertEquals("oundhertobeconsist-floater", matchedRule?.id)
+    }
+
+    @Test
     fun `chapter reader policy blocks offsite main frame navigation without changing detail policy`() {
         val chapterUrl = "https://www.mangakakalot.gg/chapter/example/chapter-1"
         val detailUrl = "https://www.mangakakalot.gg/manga/example"
@@ -103,6 +115,15 @@ class GenericBlockerEngineTest {
         )
         assertFalse(engine.policyForUrl(profile, chapterUrl).promptForOffsiteMainFrameNavigations)
         assertTrue(engine.policyForUrl(profile, detailUrl).promptForOffsiteMainFrameNavigations)
+    }
+
+    @Test
+    fun `page type policy summary reports strict chapter policy`() {
+        val summary = engine.describePolicy(profile, PageType.CHAPTER_READER)
+
+        assertTrue(summary.contains("pageType=CHAPTER_READER"))
+        assertTrue(summary.contains("offsiteMainFrameDenied=true"))
+        assertTrue(summary.contains("requestRules="))
     }
 
     @Test
