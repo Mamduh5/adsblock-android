@@ -175,7 +175,7 @@ object MangakakalotProfile {
         ),
         baselinePolicy = PagePolicy(
             blockedHosts = CommonRules.blockedHosts,
-            suspiciousHostTokens = CommonRules.suspiciousHostTokens,
+            suspiciousHosts = CommonRules.suspiciousHosts,
             suspiciousUrlTokens = CommonRules.suspiciousUrlTokens + listOf(
                 "/ads",
                 "/banner",

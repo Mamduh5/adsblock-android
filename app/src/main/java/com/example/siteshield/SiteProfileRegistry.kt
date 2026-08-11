@@ -1,12 +1,9 @@
 package com.example.siteshield
 
-object SiteProfileRegistry {
-    val defaultProfile: SiteProfile = DefaultProfile.profile
-
-    val supportedProfiles: List<SiteProfile> = listOf(
-        MangakakalotProfile.profile,
-    )
-
+class SiteProfileCatalog(
+    val defaultProfile: SiteProfile,
+    val supportedProfiles: List<SiteProfile>,
+) {
     fun byId(id: String?): SiteProfile =
         supportedProfiles.firstOrNull { it.id == id } ?: defaultProfile
 
@@ -23,4 +20,25 @@ object SiteProfileRegistry {
         if (this.isNullOrBlank()) return null
         return if (contains("://")) hostFromUrl() else normalizedHost()
     }
+}
+
+object SiteProfileRegistry {
+    internal val catalog = SiteProfileCatalog(
+        defaultProfile = DefaultProfile.profile,
+        supportedProfiles = listOf(
+            MangakakalotProfile.profile,
+        ),
+    )
+
+    val defaultProfile: SiteProfile
+        get() = catalog.defaultProfile
+
+    val supportedProfiles: List<SiteProfile>
+        get() = catalog.supportedProfiles
+
+    fun byId(id: String?): SiteProfile = catalog.byId(id)
+
+    fun match(urlOrHost: String?): SiteProfile = catalog.match(urlOrHost)
+
+    fun selectableProfiles(): List<SiteProfile> = catalog.selectableProfiles()
 }

@@ -44,7 +44,7 @@ data class PageTypeRule(
 
 data class PagePolicy(
     val blockedHosts: List<HostPattern> = emptyList(),
-    val suspiciousHostTokens: List<String> = emptyList(),
+    val suspiciousHosts: List<HostPattern> = emptyList(),
     val suspiciousUrlTokens: List<String> = emptyList(),
     val requestRules: List<RequestRule> = emptyList(),
     val domRules: DomCleanupRules = DomCleanupRules(),
@@ -54,7 +54,7 @@ data class PagePolicy(
     fun mergedWith(override: PagePolicy): PagePolicy =
         PagePolicy(
             blockedHosts = blockedHosts + override.blockedHosts,
-            suspiciousHostTokens = suspiciousHostTokens + override.suspiciousHostTokens,
+            suspiciousHosts = suspiciousHosts + override.suspiciousHosts,
             suspiciousUrlTokens = suspiciousUrlTokens + override.suspiciousUrlTokens,
             requestRules = requestRules + override.requestRules,
             domRules = domRules.mergedWith(override.domRules),
@@ -134,11 +134,20 @@ sealed class HostPattern {
         }
     }
 
-    data class Contains(private val token: String) : HostPattern() {
-        private val normalized = token.lowercase(Locale.US)
+    data class LabelToken(private val token: String) : HostPattern() {
+        private val normalized = token.normalizedHostLabel()
 
-        override fun matches(host: String?): Boolean =
-            host.normalizedHost()?.contains(normalized) == true
+        override fun matches(host: String?): Boolean {
+            val token = normalized ?: return false
+            return host.normalizedHost()
+                ?.split('.')
+                ?.any { label ->
+                    label == token ||
+                        label.startsWith("$token-") ||
+                        label.endsWith("-$token") ||
+                        label.contains("-$token-")
+                } == true
+        }
     }
 }
 
@@ -173,6 +182,13 @@ fun String?.normalizedHost(): String? =
         ?.trimEnd('.')
         ?.removePrefix("www.")
         ?.takeIf { it.isNotBlank() }
+
+private fun String?.normalizedHostLabel(): String? =
+    this
+        ?.lowercase(Locale.US)
+        ?.trim()
+        ?.trim('.')
+        ?.takeIf { it.isNotBlank() && '.' !in it }
 
 fun String.hostFromUrl(): String? =
     toUriOrNull()

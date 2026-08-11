@@ -2,15 +2,56 @@ package com.example.siteshield
 
 import java.util.Locale
 
-class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfileRegistry) {
-    fun profileForUrl(url: String?, preferredProfile: SiteProfile? = null): SiteProfile {
-        val matched = registry.match(url)
+enum class ProfileRequestContext {
+    MAIN_FRAME_NAVIGATION,
+    SUBFRAME_NAVIGATION,
+    SUBRESOURCE,
+}
+
+enum class BlockReason {
+    MALFORMED_URL,
+    UNSUPPORTED_SCHEME,
+    REQUEST_RULE,
+    BLOCKED_HOST,
+    SUSPICIOUS_HOST,
+    SUSPICIOUS_URL,
+    OFFSITE_MAIN_FRAME,
+}
+
+sealed interface BlockDecision {
+    data object Allow : BlockDecision
+
+    data class Block(
+        val reason: BlockReason,
+        val ruleId: String? = null,
+    ) : BlockDecision
+
+    data class PromptExternal(val url: String) : BlockDecision
+}
+
+class GenericBlockerEngine(
+    private val profileCatalog: SiteProfileCatalog = SiteProfileRegistry.catalog,
+) {
+    fun profileForTopLevelUrl(url: String?, currentProfile: SiteProfile? = null): SiteProfile {
+        val matched = profileCatalog.match(url)
         return when {
-            matched.id != registry.defaultProfile.id -> matched
-            preferredProfile != null -> preferredProfile
+            matched.id != profileCatalog.defaultProfile.id -> matched
+            currentProfile != null -> currentProfile
             else -> matched
         }
     }
+
+    fun profileForRequest(
+        url: String?,
+        activeTopLevelProfile: SiteProfile,
+        context: ProfileRequestContext,
+    ): SiteProfile =
+        when (context) {
+            ProfileRequestContext.MAIN_FRAME_NAVIGATION ->
+                profileForTopLevelUrl(url, activeTopLevelProfile)
+            ProfileRequestContext.SUBFRAME_NAVIGATION -> activeTopLevelProfile
+            ProfileRequestContext.SUBRESOURCE -> activeTopLevelProfile
+        }
 
     fun isAllowedHost(profile: SiteProfile, host: String?): Boolean =
         profile.allowedHosts.isEmpty() || profile.allowedHosts.any { it.matches(host) }
@@ -35,16 +76,53 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
     fun describePolicy(profile: SiteProfile, pageType: PageType): String {
         val policy = policyForPageType(profile, pageType)
         return "profile=${profile.id}, pageType=$pageType, blockedHosts=${policy.blockedHosts.size}, " +
-            "hostTokens=${policy.suspiciousHostTokens.size}, urlTokens=${policy.suspiciousUrlTokens.size}, " +
+            "suspiciousHosts=${policy.suspiciousHosts.size}, urlTokens=${policy.suspiciousUrlTokens.size}, " +
             "requestRules=${policy.requestRules.size}, offsiteMainFrameDenied=${policy.blockOffsiteMainFrameNavigations}, " +
             "offsitePrompt=${policy.promptForOffsiteMainFrameNavigations}"
     }
 
     fun isBlockedHost(profile: SiteProfile, host: String?, pageType: PageType = PageType.UNKNOWN): Boolean {
-        val normalizedHost = host.normalizedHost() ?: return false
         val policy = policyForPageType(profile, pageType)
-        return policy.blockedHosts.any { it.matches(normalizedHost) } ||
-            policy.suspiciousHostTokens.any { normalizedHost.contains(it.lowercase(Locale.US)) }
+        return hostBlockDecision(policy, host) != null
+    }
+
+    fun navigationDecision(
+        profile: SiteProfile,
+        url: String,
+        currentPageUrl: String? = url,
+        isMainFrame: Boolean = true,
+    ): BlockDecision {
+        val parsed = parseUrl(url) ?: return BlockDecision.Block(BlockReason.MALFORMED_URL)
+        val scheme = parsed.scheme?.lowercase(Locale.US)
+        if (scheme !in setOf("http", "https")) {
+            return BlockDecision.Block(BlockReason.UNSUPPORTED_SCHEME)
+        }
+
+        val currentPageType = classifyPageType(profile, currentPageUrl)
+        val policy = policyForPageType(profile, currentPageType)
+        val matchedRule = matchingRequestRule(policy, profile, url, isMainFrame)
+        if (matchedRule != null) {
+            return BlockDecision.Block(BlockReason.REQUEST_RULE, matchedRule.id)
+        }
+        hostBlockDecision(policy, parsed.host)?.let { return it }
+        if (containsSuspiciousUrlToken(policy, url)) {
+            return BlockDecision.Block(BlockReason.SUSPICIOUS_URL)
+        }
+        if (
+            isMainFrame &&
+            policy.blockOffsiteMainFrameNavigations &&
+            !isAllowedHost(profile, parsed.host)
+        ) {
+            return BlockDecision.Block(BlockReason.OFFSITE_MAIN_FRAME)
+        }
+        if (
+            isMainFrame &&
+            policy.promptForOffsiteMainFrameNavigations &&
+            !isAllowedHost(profile, parsed.host)
+        ) {
+            return BlockDecision.PromptExternal(url)
+        }
+        return BlockDecision.Allow
     }
 
     fun isSuspiciousNavigation(
@@ -52,32 +130,32 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
         url: String,
         currentPageUrl: String? = url,
         isMainFrame: Boolean = true,
-    ): Boolean {
-        val parsed = parseUrl(url) ?: return true
+    ): Boolean = navigationDecision(profile, url, currentPageUrl, isMainFrame) is BlockDecision.Block
+
+    fun resourceDecision(
+        profile: SiteProfile,
+        url: String,
+        currentPageUrl: String? = null,
+    ): BlockDecision {
+        val parsed = parseUrl(url) ?: return BlockDecision.Allow
         val scheme = parsed.scheme?.lowercase(Locale.US)
-        if (scheme !in setOf("http", "https")) return true
+        if (scheme !in setOf("http", "https")) return BlockDecision.Allow
 
-        val currentPageType = classifyPageType(profile, currentPageUrl)
-        val policy = policyForPageType(profile, currentPageType)
-        if (matchingRequestRule(profile, url, currentPageUrl, isMainFrame) != null) return true
-        if (isBlockedHost(profile, parsed.host, currentPageType)) return true
-        if (containsSuspiciousUrlToken(policy, url)) return true
-
-        return isMainFrame &&
-            policy.blockOffsiteMainFrameNavigations &&
-            !isAllowedHost(profile, parsed.host)
-    }
-
-    fun isBlockedResource(profile: SiteProfile, url: String, currentPageUrl: String? = null): Boolean {
-        val parsed = parseUrl(url) ?: return false
-        val scheme = parsed.scheme?.lowercase(Locale.US)
-        if (scheme !in setOf("http", "https")) return false
         val currentPageType = classifyPageType(profile, currentPageUrl ?: url)
         val policy = policyForPageType(profile, currentPageType)
-        if (matchingRequestRule(profile, url, currentPageUrl ?: url, isMainFrame = false) != null) return true
-        if (isBlockedHost(profile, parsed.host, currentPageType)) return true
-        return containsSuspiciousUrlToken(policy, url)
+        val matchedRule = matchingRequestRule(policy, profile, url, isMainFrame = false)
+        if (matchedRule != null) {
+            return BlockDecision.Block(BlockReason.REQUEST_RULE, matchedRule.id)
+        }
+        hostBlockDecision(policy, parsed.host)?.let { return it }
+        if (containsSuspiciousUrlToken(policy, url)) {
+            return BlockDecision.Block(BlockReason.SUSPICIOUS_URL)
+        }
+        return BlockDecision.Allow
     }
+
+    fun isBlockedResource(profile: SiteProfile, url: String, currentPageUrl: String? = null): Boolean =
+        resourceDecision(profile, url, currentPageUrl) is BlockDecision.Block
 
     fun matchingRequestRule(
         profile: SiteProfile,
@@ -86,9 +164,7 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
         isMainFrame: Boolean,
     ): RequestRule? {
         val pageType = classifyPageType(profile, currentPageUrl ?: url)
-        return policyForPageType(profile, pageType)
-            .requestRules
-            .firstOrNull { it.matches(url, profile, isMainFrame) }
+        return matchingRequestRule(policyForPageType(profile, pageType), profile, url, isMainFrame)
     }
 
     fun matchingSuspiciousCookiePattern(profile: SiteProfile, key: String): Regex? =
@@ -123,6 +199,25 @@ class GenericBlockerEngine(private val registry: SiteProfileRegistry = SiteProfi
         val lowerUrl = url.lowercase(Locale.US)
         return policy.suspiciousUrlTokens.any { lowerUrl.contains(it.lowercase(Locale.US)) }
     }
+
+    private fun hostBlockDecision(policy: PagePolicy, host: String?): BlockDecision.Block? {
+        val normalizedHost = host.normalizedHost() ?: return null
+        if (policy.blockedHosts.any { it.matches(normalizedHost) }) {
+            return BlockDecision.Block(BlockReason.BLOCKED_HOST)
+        }
+        if (policy.suspiciousHosts.any { it.matches(normalizedHost) }) {
+            return BlockDecision.Block(BlockReason.SUSPICIOUS_HOST)
+        }
+        return null
+    }
+
+    private fun matchingRequestRule(
+        policy: PagePolicy,
+        profile: SiteProfile,
+        url: String,
+        isMainFrame: Boolean,
+    ): RequestRule? =
+        policy.requestRules.firstOrNull { it.matches(url, profile, isMainFrame) }
 
     private fun parseUrl(url: String) = url.toUriOrNull()
 }

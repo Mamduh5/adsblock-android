@@ -18,15 +18,15 @@ object CommonRules {
         HostPattern.DomainSuffix("redirectingat.com"),
     )
 
-    val suspiciousHostTokens = listOf(
-        "adserver",
-        "ads.",
-        "popunder",
-        "popup",
-        "redirect",
-        "interstitial",
-        "clicktrack",
-        "push-notif",
+    val suspiciousHosts = listOf(
+        HostPattern.LabelToken("adserver"),
+        HostPattern.LabelToken("ads"),
+        HostPattern.LabelToken("popunder"),
+        HostPattern.LabelToken("popup"),
+        HostPattern.LabelToken("redirect"),
+        HostPattern.LabelToken("interstitial"),
+        HostPattern.LabelToken("clicktrack"),
+        HostPattern.LabelToken("push-notif"),
     )
 
     val suspiciousUrlTokens = listOf(

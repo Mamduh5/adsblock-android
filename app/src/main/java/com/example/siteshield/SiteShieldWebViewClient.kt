@@ -25,38 +25,40 @@ class SiteShieldWebViewClient(
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
         val url = uri.toString()
-        val profile = blockerEngine.profileForUrl(url, currentProfile())
-        onProfileMatched(profile)
+        val requestContext = if (request.isForMainFrame) {
+            ProfileRequestContext.MAIN_FRAME_NAVIGATION
+        } else {
+            ProfileRequestContext.SUBFRAME_NAVIGATION
+        }
+        val profile = blockerEngine.profileForRequest(url, currentProfile(), requestContext)
+        if (request.isForMainFrame) {
+            onProfileMatched(profile)
+        }
 
         if (!settingsStore.blockerEnabled) return false
 
         val currentPageUrl = view.url
-        if (blockerEngine.isSuspiciousNavigation(profile, url, currentPageUrl, request.isForMainFrame)) {
-            val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
-            val matchedRule = blockerEngine.matchingRequestRule(profile, url, currentPageUrl, request.isForMainFrame)
-            onEvent(
-                DebugEvent(
-                    category = DebugEventCategory.NAV_BLOCK,
-                    message = "[${profile.displayName}] Blocked main-frame=${request.isForMainFrame} navigation to ${uri.host ?: uri}",
-                    detail = "pageType=$pageType, matchedRule=${matchedRule?.id ?: "policy"}, url=$url",
-                ),
-            )
-            if (profile.warnOnSuspiciousNavigation) {
-                Toast.makeText(context, "Blocked suspicious navigation", Toast.LENGTH_SHORT).show()
+        when (val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)) {
+            is BlockDecision.Block -> {
+                val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.NAV_BLOCK,
+                        message = "[${profile.displayName}] Blocked main-frame=${request.isForMainFrame} navigation to ${uri.host ?: uri}",
+                        detail = "pageType=$pageType, reason=${decision.reason}, ruleId=${decision.ruleId ?: "none"}, url=$url",
+                    ),
+                )
+                if (profile.warnOnSuspiciousNavigation) {
+                    Toast.makeText(context, "Blocked suspicious navigation", Toast.LENGTH_SHORT).show()
+                }
+                return true
             }
-            return true
+            is BlockDecision.PromptExternal -> {
+                promptExternalOpen(uri)
+                return true
+            }
+            BlockDecision.Allow -> return false
         }
-
-        if (blockerEngine.isAllowedHost(profile, uri.host)) {
-            return false
-        }
-
-        if (request.isForMainFrame && blockerEngine.shouldPromptForOffsiteMainFrameNavigation(profile, url, currentPageUrl)) {
-            promptExternalOpen(uri)
-            return true
-        }
-
-        return false
     }
 
     override fun shouldInterceptRequest(
@@ -66,16 +68,20 @@ class SiteShieldWebViewClient(
         if (!settingsStore.blockerEnabled || request.isForMainFrame) return null
 
         val uri = request.url
-        val profile = blockerEngine.profileForUrl(uri.toString(), currentProfile())
-        if (!blockerEngine.isBlockedResource(profile, uri.toString(), view.url)) return null
+        val profile = blockerEngine.profileForRequest(
+            uri.toString(),
+            currentProfile(),
+            ProfileRequestContext.SUBRESOURCE,
+        )
+        val decision = blockerEngine.resourceDecision(profile, uri.toString(), view.url)
+        if (decision !is BlockDecision.Block) return null
 
         val pageType = blockerEngine.classifyPageType(profile, view.url)
-        val matchedRule = blockerEngine.matchingRequestRule(profile, uri.toString(), view.url, isMainFrame = false)
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.RESOURCE_BLOCK,
                 message = "[${profile.displayName}] Blocked subresource from ${uri.host ?: uri}",
-                detail = "pageType=$pageType, matchedRule=${matchedRule?.id ?: "policy"}, url=${uri}",
+                detail = "pageType=$pageType, reason=${decision.reason}, ruleId=${decision.ruleId ?: "none"}, url=${uri}",
             ),
         )
         return WebResourceResponse(
@@ -90,7 +96,7 @@ class SiteShieldWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        val profile = blockerEngine.profileForUrl(url, currentProfile())
+        val profile = blockerEngine.profileForTopLevelUrl(url, currentProfile())
         onProfileMatched(profile)
         val pageType = blockerEngine.classifyPageType(profile, url)
         onEvent(

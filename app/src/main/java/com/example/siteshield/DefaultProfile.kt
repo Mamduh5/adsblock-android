@@ -8,7 +8,7 @@ object DefaultProfile {
         allowedHosts = emptyList(),
         baselinePolicy = PagePolicy(
             blockedHosts = CommonRules.blockedHosts,
-            suspiciousHostTokens = CommonRules.suspiciousHostTokens,
+            suspiciousHosts = CommonRules.suspiciousHosts,
             suspiciousUrlTokens = CommonRules.suspiciousUrlTokens,
             domRules = CommonRules.domRules,
         ),

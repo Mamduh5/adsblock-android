@@ -127,10 +127,24 @@ class GenericBlockerEngineTest {
     }
 
     @Test
-    fun `rule selection keeps preferred profile for unknown resource urls`() {
-        val selected = engine.profileForUrl("https://unknown-cdn.example/assets/app.js", profile)
+    fun `top level profile selection keeps current profile for unknown urls`() {
+        val selected = engine.profileForTopLevelUrl("https://unknown-cdn.example/assets/app.js", profile)
 
         assertEquals("mangakakalot", selected.id)
+    }
+
+    @Test
+    fun `resource decision reports matched rule without reevaluating in caller`() {
+        val decision = engine.resourceDecision(
+            profile,
+            "https://oundhertobeconsist.org/floater",
+            "https://www.mangakakalot.gg/chapter/example/chapter-1",
+        )
+
+        assertEquals(
+            BlockDecision.Block(BlockReason.REQUEST_RULE, "oundhertobeconsist-floater"),
+            decision,
+        )
     }
 
     @Test
