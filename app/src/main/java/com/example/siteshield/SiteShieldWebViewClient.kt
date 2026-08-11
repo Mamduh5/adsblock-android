@@ -16,28 +16,32 @@ class SiteShieldWebViewClient(
     private val context: Context,
     private val settingsStore: SettingsStore,
     private val blockerEngine: GenericBlockerEngine,
-    private val currentProfile: () -> SiteProfile,
+    initialProfile: SiteProfile,
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
 ) : WebViewClient() {
+    private val topLevelContext = TopLevelContextStore(
+        TopLevelContext(
+            url = null,
+            profile = initialProfile,
+        ),
+    )
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
         val url = uri.toString()
+        val activeContext = topLevelContext.snapshot()
         val requestContext = if (request.isForMainFrame) {
             ProfileRequestContext.MAIN_FRAME_NAVIGATION
         } else {
             ProfileRequestContext.SUBFRAME_NAVIGATION
         }
-        val profile = blockerEngine.profileForRequest(url, currentProfile(), requestContext)
-        if (request.isForMainFrame) {
-            onProfileMatched(profile)
-        }
+        val profile = blockerEngine.profileForRequest(url, activeContext.profile, requestContext)
 
         if (!settingsStore.blockerEnabled) return false
 
-        val currentPageUrl = view.url
+        val currentPageUrl = activeContext.url
         when (val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)) {
             is BlockDecision.Block -> {
                 val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
@@ -68,15 +72,16 @@ class SiteShieldWebViewClient(
         if (!settingsStore.blockerEnabled || request.isForMainFrame) return null
 
         val uri = request.url
+        val activeContext = topLevelContext.snapshot()
         val profile = blockerEngine.profileForRequest(
             uri.toString(),
-            currentProfile(),
+            activeContext.profile,
             ProfileRequestContext.SUBRESOURCE,
         )
-        val decision = blockerEngine.resourceDecision(profile, uri.toString(), view.url)
+        val decision = blockerEngine.resourceDecision(profile, uri.toString(), activeContext.url)
         if (decision !is BlockDecision.Block) return null
 
-        val pageType = blockerEngine.classifyPageType(profile, view.url)
+        val pageType = blockerEngine.classifyPageType(profile, activeContext.url)
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.RESOURCE_BLOCK,
@@ -96,9 +101,9 @@ class SiteShieldWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        val profile = blockerEngine.profileForTopLevelUrl(url, currentProfile())
-        onProfileMatched(profile)
-        val pageType = blockerEngine.classifyPageType(profile, url)
+        val updatedContext = updateTopLevelContext(url)
+        val profile = updatedContext.profile
+        val pageType = blockerEngine.classifyPageType(profile, updatedContext.url)
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
@@ -120,6 +125,16 @@ class SiteShieldWebViewClient(
         if (settingsStore.blockerEnabled) {
             onPageLoaded(view)
         }
+    }
+
+    private fun updateTopLevelContext(url: String?): TopLevelContext {
+        val previousContext = topLevelContext.snapshot()
+        val updatedUrl = url ?: previousContext.url
+        val updatedProfile = blockerEngine.profileForTopLevelUrl(updatedUrl, previousContext.profile)
+        val updatedContext = TopLevelContext(updatedUrl, updatedProfile)
+        topLevelContext.update(updatedContext)
+        onProfileMatched(updatedProfile)
+        return updatedContext
     }
 
     private fun promptExternalOpen(uri: Uri) {

@@ -106,7 +106,7 @@ class MainActivity : Activity() {
             context = this,
             settingsStore = settingsStore,
             blockerEngine = blockerEngine,
-            currentProfile = { activeProfile },
+            initialProfile = activeProfile,
             onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
             onPageLoaded = ::injectDomCleanup,
