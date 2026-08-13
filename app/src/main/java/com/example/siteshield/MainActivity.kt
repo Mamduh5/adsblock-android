@@ -6,12 +6,16 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.Message
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -36,10 +40,11 @@ class MainActivity : Activity() {
     private lateinit var markerText: TextView
     private lateinit var filterButton: Button
     private lateinit var shieldPanel: LinearLayout
+    private lateinit var debugOverlay: FrameLayout
     private lateinit var shieldControl: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
     private var debugFilter: DebugEventCategory? = null
-    private var shieldPanelState = ShieldPanelState.COLLAPSED
+    private var shieldUiState = ShieldUiState()
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +63,7 @@ class MainActivity : Activity() {
         )
         val root = buildUi(dataCleaner)
         setContentView(root)
+        observeWebViewDoubleTaps()
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.PROFILE,
@@ -130,8 +136,9 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        if (shieldPanelState.consumesBack()) {
-            collapseShieldPanel()
+        if (shieldUiState.consumesBack()) {
+            shieldUiState = shieldUiState.afterBack()
+            syncShieldUi()
         } else if (webView.canGoBack()) {
             webView.goBack()
         } else {
@@ -179,7 +186,8 @@ class MainActivity : Activity() {
 
         val blockerSwitch = Switch(this).apply {
             text = "Blocker"
-            textSize = 13f
+            textSize = 15f
+            minimumHeight = dp(48)
             isChecked = settingsStore.blockerEnabled
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.blockerEnabled = enabled
@@ -199,12 +207,12 @@ class MainActivity : Activity() {
         }
 
         val debugSwitch = Switch(this).apply {
-            text = "Debug"
-            textSize = 13f
+            text = "Debug updates"
+            textSize = 15f
+            minimumHeight = dp(48)
             isChecked = settingsStore.debugEnabled
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.debugEnabled = enabled
-                syncShieldPanelVisibility()
                 updateDebugLog()
             }
         }
@@ -220,7 +228,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(4), dp(8), dp(4))
-            visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
         }
 
         val clearLogButton = smallButton("Clear") {
@@ -237,16 +244,19 @@ class MainActivity : Activity() {
             cycleDebugFilter()
         }
 
-        listOf(clearLogButton, copyLogButton, filterButton).forEach {
-            debugTools.addView(it)
+        listOf(clearLogButton, copyLogButton, filterButton).forEach { control ->
+            debugTools.addView(
+                control,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
         }
 
         debugPanel = ScrollView(this).apply {
-            visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
             setBackgroundColor(Color.rgb(243, 244, 246))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(160),
+                0,
+                1f,
             )
         }
 
@@ -263,18 +273,30 @@ class MainActivity : Activity() {
         )
         root.addView(webView)
 
+        val openDebugButton = largeButton("Open Debug Logs") {
+            shieldUiState = shieldUiState.openDebug()
+            updateRuntimeMarkers()
+            updateDebugLog()
+            syncShieldUi()
+        }
+
+        val closeShieldButton = largeButton("Close") {
+            collapseShieldPanel()
+        }
+
         shieldPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(250, 250, 250))
-            setPadding(dp(8), dp(6), dp(8), dp(8))
+            setPadding(dp(16), dp(14), dp(16), dp(16))
             elevation = dp(8).toFloat()
+            isClickable = true
             visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP,
+                Gravity.CENTER,
             ).apply {
-                setMargins(dp(10), dp(10), dp(10), dp(10))
+                setMargins(dp(28), dp(24), dp(28), dp(24))
             }
         }.apply {
             addView(domainText)
@@ -284,24 +306,83 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
             addView(controlRow(cleanupButton, dataCleanButton))
-            addView(controlRow(blockerSwitch, debugSwitch))
-            addView(markerText)
-            addView(debugTools)
-            addView(debugPanel)
+            addView(blockerSwitch)
+            addView(debugSwitch)
+            addView(openDebugButton)
+            addView(closeShieldButton)
         }
         root.addView(shieldPanel)
 
+        val debugHeading = TextView(this).apply {
+            text = "Debug Logs"
+            textSize = 18f
+            setTextColor(Color.rgb(17, 24, 39))
+            setPadding(dp(8), dp(4), dp(8), dp(8))
+        }
+        val closeDebugButton = largeButton("Close Debug Logs") {
+            shieldUiState = shieldUiState.closeDebug()
+            syncShieldUi()
+        }
+        val debugCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(250, 250, 250))
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            elevation = dp(12).toFloat()
+            isClickable = true
+            isFocusable = true
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER,
+            )
+            addView(debugHeading)
+            addView(markerText)
+            addView(debugTools)
+            addView(debugPanel)
+            addView(closeDebugButton)
+        }
+        debugOverlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.argb(72, 0, 0, 0))
+            isClickable = true
+            isFocusable = true
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            addView(debugCard)
+        }
+        root.addView(debugOverlay)
+        root.addOnLayoutChangeListener { _, _, _, right, bottom, _, _, _, _ ->
+            if (right <= 0 || bottom <= 0) return@addOnLayoutChangeListener
+            val params = debugCard.layoutParams as FrameLayout.LayoutParams
+            val desiredWidth = (right * 0.9f).toInt()
+            val desiredHeight = (bottom * 0.75f).toInt()
+            if (params.width != desiredWidth || params.height != desiredHeight) {
+                params.width = desiredWidth
+                params.height = desiredHeight
+                debugCard.layoutParams = params
+            }
+        }
+
         shieldControl = smallButton("Shield") {
-            shieldPanelState = shieldPanelState.toggled()
-            syncShieldPanelVisibility()
+            shieldUiState = shieldUiState.togglePanel()
+            syncShieldUi()
         }.apply {
             contentDescription = "Show or hide Site Shield controls"
-            layoutParams = FrameLayout.LayoutParams(dp(72), dp(44), Gravity.END or Gravity.BOTTOM).apply {
-                setMargins(dp(12), dp(12), dp(12), dp(16))
+            layoutParams = FrameLayout.LayoutParams(dp(86), dp(52), Gravity.END or Gravity.BOTTOM).apply {
+                setMargins(dp(12), dp(12), dp(12), dp(28))
             }
         }
         root.addView(shieldControl)
-        syncShieldPanelVisibility()
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val params = shieldControl.layoutParams as FrameLayout.LayoutParams
+            params.bottomMargin = navigationBarBottomInset(insets) + dp(28)
+            shieldControl.layoutParams = params
+            insets
+        }
+        root.requestApplyInsets()
+        syncShieldUi()
         updateRuntimeMarkers()
         return root
     }
@@ -319,32 +400,56 @@ class MainActivity : Activity() {
         }
 
     private fun collapseShieldPanel() {
-        shieldPanelState = shieldPanelState.afterTopLevelNavigation()
-        syncShieldPanelVisibility()
+        shieldUiState = shieldUiState.afterTopLevelNavigation()
+        syncShieldUi()
     }
 
-    private fun syncShieldPanelVisibility() {
-        if (!::shieldControl.isInitialized || !::shieldPanel.isInitialized) return
-        val expanded = shieldPanelState == ShieldPanelState.EXPANDED
-        shieldPanel.visibility = if (expanded) View.VISIBLE else View.GONE
-        markerText.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
-        debugTools.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
-        debugPanel.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
-        shieldControl.visibility = View.VISIBLE
-        shieldControl.text = if (expanded) "Hide" else "Shield"
+    private fun syncShieldUi() {
+        if (!::shieldControl.isInitialized || !::shieldPanel.isInitialized || !::debugOverlay.isInitialized) return
+        val debugOpen = shieldUiState.debugOverlay == DebugOverlayState.OPEN
+        val panelOpen = shieldUiState.panel == ShieldPanelState.EXPANDED && !debugOpen
+        shieldPanel.visibility = if (panelOpen) View.VISIBLE else View.GONE
+        debugOverlay.visibility = if (debugOpen) View.VISIBLE else View.GONE
+        shieldControl.visibility = if (
+            shieldUiState.visibility == ShieldVisibility.VISIBLE && !debugOpen
+        ) View.VISIBLE else View.GONE
+        shieldControl.text = if (panelOpen) "Hide" else "Shield"
     }
 
     private fun smallButton(label: String, onClick: () -> Unit): Button =
         Button(this).apply {
             text = label
-            textSize = 12f
-            minHeight = 0
-            minimumHeight = 0
+            textSize = 14f
+            minHeight = dp(48)
+            minimumHeight = dp(48)
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(8), 0, dp(8), 0)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             setOnClickListener { onClick() }
         }
+
+    private fun largeButton(label: String, onClick: () -> Unit): Button =
+        smallButton(label, onClick).apply {
+            textSize = 15f
+            minimumHeight = dp(50)
+        }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun observeWebViewDoubleTaps() {
+        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent): Boolean = true
+
+            override fun onDoubleTap(event: MotionEvent): Boolean {
+                shieldUiState = shieldUiState.onWebViewDoubleTap()
+                syncShieldUi()
+                return true
+            }
+        })
+        webView.setOnTouchListener { _, event ->
+            detector.onTouchEvent(event)
+            false
+        }
+    }
 
     private fun injectDomCleanup(view: WebView) {
         val pageUrl = view.url ?: activeProfile.startUrl
@@ -488,6 +593,14 @@ class MainActivity : Activity() {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    @Suppress("DEPRECATION")
+    private fun navigationBarBottomInset(insets: WindowInsets): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+        } else {
+            insets.systemWindowInsetBottom
+        }
 
     companion object {
         private const val MAX_EVENTS = 200

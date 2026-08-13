@@ -13,20 +13,60 @@ class ShieldPanelStateTest {
     }
 
     @Test
-    fun `top level navigation always collapses the shield panel`() {
+    fun `shield is visible with overlays closed by default`() {
         assertEquals(
-            ShieldPanelState.COLLAPSED,
-            ShieldPanelState.EXPANDED.afterTopLevelNavigation(),
-        )
-        assertEquals(
-            ShieldPanelState.COLLAPSED,
-            ShieldPanelState.COLLAPSED.afterTopLevelNavigation(),
+            ShieldUiState(),
+            ShieldUiState(
+                visibility = ShieldVisibility.VISIBLE,
+                panel = ShieldPanelState.COLLAPSED,
+                debugOverlay = DebugOverlayState.CLOSED,
+            ),
         )
     }
 
     @Test
-    fun `back is consumed only while the shield panel is expanded`() {
-        assertTrue(ShieldPanelState.EXPANDED.consumesBack())
-        assertFalse(ShieldPanelState.COLLAPSED.consumesBack())
+    fun `double tap toggles shield visibility and closes its panel`() {
+        val hidden = ShieldUiState(panel = ShieldPanelState.EXPANDED).onWebViewDoubleTap()
+
+        assertEquals(ShieldVisibility.HIDDEN, hidden.visibility)
+        assertEquals(ShieldPanelState.COLLAPSED, hidden.panel)
+        assertEquals(ShieldVisibility.VISIBLE, hidden.onWebViewDoubleTap().visibility)
+    }
+
+    @Test
+    fun `navigation collapses overlays without changing shield visibility`() {
+        val hidden = ShieldUiState(
+            visibility = ShieldVisibility.HIDDEN,
+            panel = ShieldPanelState.EXPANDED,
+        ).afterTopLevelNavigation()
+        val visible = ShieldUiState(
+            visibility = ShieldVisibility.VISIBLE,
+            panel = ShieldPanelState.EXPANDED,
+        ).afterTopLevelNavigation()
+
+        assertEquals(ShieldVisibility.HIDDEN, hidden.visibility)
+        assertEquals(ShieldVisibility.VISIBLE, visible.visibility)
+        assertEquals(ShieldPanelState.COLLAPSED, hidden.panel)
+        assertEquals(ShieldPanelState.COLLAPSED, visible.panel)
+    }
+
+    @Test
+    fun `back from debug returns to shield panel then closes panel`() {
+        val debug = ShieldUiState(panel = ShieldPanelState.EXPANDED).openDebug()
+        val returnedPanel = debug.afterBack()
+        val collapsed = returnedPanel.afterBack()
+
+        assertTrue(debug.consumesBack())
+        assertEquals(DebugOverlayState.CLOSED, returnedPanel.debugOverlay)
+        assertEquals(ShieldPanelState.EXPANDED, returnedPanel.panel)
+        assertEquals(ShieldPanelState.COLLAPSED, collapsed.panel)
+        assertFalse(collapsed.consumesBack())
+    }
+
+    @Test
+    fun `double tap is ignored while debug owns interaction`() {
+        val debug = ShieldUiState().openDebug()
+
+        assertEquals(debug, debug.onWebViewDoubleTap())
     }
 }
