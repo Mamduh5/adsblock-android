@@ -66,7 +66,7 @@ class SiteProfileRegistryTest {
     @Test
     fun `selectable profiles include all production sites in order`() {
         assertEquals(
-            listOf("mangakakalot", "palworld-gg", "aquareader", "youtube"),
+            listOf("mangakakalot", "palworld-gg", "aquareader", "youtube", "facebook"),
             SiteProfileRegistry.selectableProfiles().map { it.id },
         )
     }
@@ -90,6 +90,29 @@ class SiteProfileRegistryTest {
             "https://rr1---sn.example.c.youtube.com/videoplayback",
         ).forEach { url ->
             assertFalse(SiteProfileRegistry.match(url).id == "youtube")
+        }
+    }
+
+    @Test
+    fun `matches facebook locale and mobile hosts and rejects lookalikes`() {
+        listOf(
+            "https://facebook.com/",
+            "https://www.facebook.com/marketplace/",
+            "https://m.facebook.com/reel/123",
+            "https://th-th.facebook.com/Meta",
+        ).forEach { url ->
+            assertEquals(url, "facebook", SiteProfileRegistry.match(url).id)
+        }
+
+        listOf(
+            "https://facebook.example.com/",
+            "https://facebook.com.scam.example/",
+            "https://fake-facebook.com/",
+            "https://facebookcom.example/",
+            "https://edge-chat.facebook.com/pull",
+            "https://static.facebook.com/app.js",
+        ).forEach { url ->
+            assertFalse(SiteProfileRegistry.match(url).id == "facebook")
         }
     }
 }

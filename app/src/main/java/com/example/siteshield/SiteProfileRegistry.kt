@@ -30,6 +30,7 @@ object SiteProfileRegistry {
             PalworldGgProfile.profile,
             AquaReaderProfile.profile,
             YouTubeProfile.profile,
+            FacebookProfile.profile,
         ),
     )
 

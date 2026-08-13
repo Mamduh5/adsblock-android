@@ -250,6 +250,64 @@ class ProfileOwnershipTest {
         assertEquals("youtube", selected.id)
     }
 
+    @Test
+    fun `main frame navigation switches to and from facebook`() {
+        val productionEngine = GenericBlockerEngine()
+
+        listOf(
+            MangakakalotProfile.profile,
+            PalworldGgProfile.profile,
+            AquaReaderProfile.profile,
+            YouTubeProfile.profile,
+        ).forEach { source ->
+            assertEquals(
+                "facebook",
+                productionEngine.profileForRequest(
+                    "https://m.facebook.com/marketplace/",
+                    source,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+
+        listOf(
+            "https://www.mangakakalot.gg/" to "mangakakalot",
+            "https://palworld.gg/" to "palworld-gg",
+            "https://aquareader.org/" to "aquareader",
+            "https://www.youtube.com/" to "youtube",
+        ).forEach { (url, expected) ->
+            assertEquals(
+                expected,
+                productionEngine.profileForRequest(
+                    url,
+                    FacebookProfile.profile,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+    }
+
+    @Test
+    fun `facebook subresources retain facebook top level ownership`() {
+        val productionEngine = GenericBlockerEngine()
+
+        listOf(
+            "https://static.xx.fbcdn.net/rsrc.php/v4/yx/r/app.js",
+            "https://scontent.fbkk1-1.fna.fbcdn.net/v/t39.30808-6/image.jpg",
+            "https://edge-chat.facebook.com/pull",
+        ).forEach { url ->
+            assertEquals(
+                url,
+                "facebook",
+                productionEngine.profileForRequest(
+                    url,
+                    FacebookProfile.profile,
+                    ProfileRequestContext.SUBRESOURCE,
+                ).id,
+            )
+        }
+    }
+
     private fun profile(
         id: String,
         allowedHosts: List<HostPattern>,
