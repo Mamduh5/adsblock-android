@@ -82,7 +82,10 @@ class YouTubeProfileTest {
         assertTrue(rules.preserveSelectors.contains("ytd-compact-video-renderer"))
         assertTrue(rules.preserveSelectors.contains("shorts-page"))
         assertTrue(rules.preserveSelectors.contains("#player-container-id"))
+        assertTrue(rules.preserveSelectors.contains("ytm-engagement-panel"))
+        assertTrue(rules.preserveSelectors.contains("ytw-scrim.ytWebScrimHostEngagementPanel"))
         assertFalse(rules.suspiciousSelectors.contains("ytd-video-renderer"))
+        assertFalse(rules.enableGenericOverlayHeuristics)
         assertFalse(profile.allowThirdPartyCookies)
         assertFalse(profile.warnOnSuspiciousNavigation)
     }

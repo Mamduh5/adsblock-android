@@ -104,6 +104,7 @@ data class DomCleanupRules(
     val junkTextTokens: List<String> = emptyList(),
     val highZIndexThreshold: Int = 999,
     val overlayViewportCoverageThreshold: Double = 0.28,
+    val enableGenericOverlayHeuristics: Boolean = true,
 ) {
     fun mergedWith(override: DomCleanupRules): DomCleanupRules =
         DomCleanupRules(
@@ -116,6 +117,8 @@ data class DomCleanupRules(
             highZIndexThreshold = minOf(highZIndexThreshold, override.highZIndexThreshold),
             overlayViewportCoverageThreshold =
                 minOf(overlayViewportCoverageThreshold, override.overlayViewportCoverageThreshold),
+            enableGenericOverlayHeuristics =
+                enableGenericOverlayHeuristics && override.enableGenericOverlayHeuristics,
         )
 }
 

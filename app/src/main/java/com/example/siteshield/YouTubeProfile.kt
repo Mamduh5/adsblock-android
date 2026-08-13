@@ -34,6 +34,7 @@ object YouTubeProfile {
             "#search",
             "input.searchbox-input",
         ),
+        enableGenericOverlayHeuristics = false,
     )
 
     private val playerDomRules = DomCleanupRules(
@@ -58,6 +59,8 @@ object YouTubeProfile {
             ".ytShortsCarouselCarouselWrapper",
             ".ytShortsCarouselCarouselItems",
             ".ytShortsCarouselCarouselItem",
+            "ytm-engagement-panel",
+            "ytw-scrim.ytWebScrimHostEngagementPanel",
         ),
     )
 

@@ -159,6 +159,13 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
+        val contentLayer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+        root.addView(contentLayer)
 
         domainText = TextView(this).apply {
             text = "Site Shield - ${activeProfile.displayName}"
@@ -271,7 +278,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
-        root.addView(webView)
+        contentLayer.addView(webView)
 
         val openDebugButton = largeButton("Open Debug Logs") {
             shieldUiState = shieldUiState.openDebug()
@@ -311,7 +318,7 @@ class MainActivity : Activity() {
             addView(openDebugButton)
             addView(closeShieldButton)
         }
-        root.addView(shieldPanel)
+        contentLayer.addView(shieldPanel)
 
         val debugHeading = TextView(this).apply {
             text = "Debug Logs"
@@ -352,8 +359,8 @@ class MainActivity : Activity() {
             )
             addView(debugCard)
         }
-        root.addView(debugOverlay)
-        root.addOnLayoutChangeListener { _, _, _, right, bottom, _, _, _, _ ->
+        contentLayer.addView(debugOverlay)
+        contentLayer.addOnLayoutChangeListener { _, _, _, right, bottom, _, _, _, _ ->
             if (right <= 0 || bottom <= 0) return@addOnLayoutChangeListener
             val params = debugCard.layoutParams as FrameLayout.LayoutParams
             val desiredWidth = (right * 0.9f).toInt()
@@ -376,6 +383,9 @@ class MainActivity : Activity() {
         }
         root.addView(shieldControl)
         root.setOnApplyWindowInsetsListener { _, insets ->
+            val contentParams = contentLayer.layoutParams as FrameLayout.LayoutParams
+            contentParams.topMargin = topSafeInset(insets)
+            contentLayer.layoutParams = contentParams
             val params = shieldControl.layoutParams as FrameLayout.LayoutParams
             params.bottomMargin = navigationBarBottomInset(insets) + dp(28)
             shieldControl.layoutParams = params
@@ -595,6 +605,17 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Suppress("DEPRECATION")
+    private fun topSafeInset(insets: WindowInsets): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            topSafeInsetPx(
+                insets.getInsets(WindowInsets.Type.statusBars()).top,
+                insets.getInsets(WindowInsets.Type.displayCutout()).top,
+            )
+        } else {
+            topSafeInsetPx(insets.systemWindowInsetTop, insets.displayCutout?.safeInsetTop ?: 0)
+        }
+
+    @Suppress("DEPRECATION")
     private fun navigationBarBottomInset(insets: WindowInsets): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             insets.getInsets(WindowInsets.Type.navigationBars()).bottom
@@ -608,7 +629,10 @@ class MainActivity : Activity() {
     }
 }
 
-private fun DomCleanupRules.toJavascriptObject(): String =
+internal fun topSafeInsetPx(statusBarTop: Int, displayCutoutTop: Int): Int =
+    maxOf(statusBarTop, displayCutoutTop)
+
+internal fun DomCleanupRules.toJavascriptObject(): String =
     buildString {
         append("{")
         append("\"suspiciousSelectors\":")
@@ -627,6 +651,8 @@ private fun DomCleanupRules.toJavascriptObject(): String =
         append(highZIndexThreshold)
         append(",\"overlayViewportCoverageThreshold\":")
         append(overlayViewportCoverageThreshold)
+        append(",\"enableGenericOverlayHeuristics\":")
+        append(enableGenericOverlayHeuristics)
         append("}")
     }
 

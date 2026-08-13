@@ -6,6 +6,7 @@
   const overlayViewportCoverageThreshold = Number.isFinite(config.overlayViewportCoverageThreshold)
     ? config.overlayViewportCoverageThreshold
     : 0.28;
+  const enableGenericOverlayHeuristics = config.enableGenericOverlayHeuristics !== false;
   const baitText = tokenRegex(config.baitTextTokens, true);
   const junkText = tokenRegex(config.junkTextTokens, false);
   const suspiciousUrl = tokenRegex(config.suspiciousUrlTokens, false);
@@ -135,7 +136,7 @@
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
 
-    if (isSuspiciousOverlay(element, style, rect)) {
+    if (enableGenericOverlayHeuristics && isSuspiciousOverlay(element, style, rect)) {
       neutralize(element, "suspicious-overlay");
       return;
     }
