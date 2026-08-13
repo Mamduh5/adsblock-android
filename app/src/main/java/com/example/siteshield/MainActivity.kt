@@ -684,6 +684,8 @@ private fun List<AncestorDomCleanupRule>.toJavascriptRuleArray(): String =
             append(rule.maxAncestorDepth)
             append(",\"removalReason\":")
             append(rule.removalReason.toJavascriptString())
+            append(",\"neutralizationStrategy\":")
+            append(rule.neutralizationStrategy.javascriptValue.toJavascriptString())
             append("}")
         }
     }

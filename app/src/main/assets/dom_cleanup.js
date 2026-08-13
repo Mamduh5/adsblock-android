@@ -14,6 +14,8 @@
   const suspiciousClass = tokenRegex(config.suspiciousClassTokens, false);
   let removed = 0;
   const removedFamilies = {};
+  const preservedAncestorRules = new WeakMap();
+  const preservedAncestorAttribute = "data-site-shield-neutralized";
 
   function tokenRegex(tokens, exact) {
     const safeTokens = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
@@ -69,6 +71,68 @@
     removed += 1;
     removedFamilies[reason] = (removedFamilies[reason] || 0) + 1;
     console.info("[SiteShield] dom family=" + reason + " removed=1");
+  }
+
+  function ensurePreservedAncestorStyle() {
+    if (document.getElementById("site-shield-preserved-ancestor-style")) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = "site-shield-preserved-ancestor-style";
+    style.textContent =
+      "[" + preservedAncestorAttribute + "] > * {" +
+      "display:none!important;pointer-events:none!important;" +
+      "}" +
+      "[" + preservedAncestorAttribute + "] {" +
+      "height:1px!important;min-height:0!important;max-height:1px!important;" +
+      "overflow:hidden!important;pointer-events:none!important;" +
+      "}";
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function markerTextMatchesRule(marker, rule) {
+    const markerText = (marker.textContent || "").trim();
+    return rule.markerTextPrefixes.some(function(prefix) {
+      return prefix && markerText.startsWith(prefix);
+    });
+  }
+
+  function ownerContainsMatchingMarker(owner, rule) {
+    try {
+      return Array.from(owner.querySelectorAll(rule.markerSelector)).some(function(marker) {
+        return markerTextMatchesRule(marker, rule);
+      });
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function preserveAncestorAndHideChildren(owner, rule) {
+    ensurePreservedAncestorStyle();
+    if (owner.getAttribute(preservedAncestorAttribute) === rule.removalReason) {
+      return;
+    }
+    owner.setAttribute(preservedAncestorAttribute, rule.removalReason);
+    preservedAncestorRules.set(owner, rule);
+    removed += 1;
+    removedFamilies[rule.removalReason] = (removedFamilies[rule.removalReason] || 0) + 1;
+    console.info(
+      "[SiteShield] dom family=" + rule.removalReason +
+      " neutralized=1 boundary=children owner=preserved"
+    );
+  }
+
+  function reconcilePreservedAncestor(owner) {
+    const rule = preservedAncestorRules.get(owner);
+    if (!rule || ownerContainsMatchingMarker(owner, rule)) {
+      return;
+    }
+    owner.removeAttribute(preservedAncestorAttribute);
+    preservedAncestorRules.delete(owner);
+    console.info(
+      "[SiteShield] dom family=" + rule.removalReason +
+      " restored=1 owner=recycled"
+    );
   }
 
   function isSuspiciousFrame(element) {
@@ -159,8 +223,7 @@
     if (!(marker instanceof HTMLElement) || !rule || !Array.isArray(rule.markerTextPrefixes)) {
       return;
     }
-    const markerText = (marker.textContent || "").trim();
-    if (!rule.markerTextPrefixes.some(function(prefix) { return prefix && markerText.startsWith(prefix); })) {
+    if (!markerTextMatchesRule(marker, rule)) {
       return;
     }
 
@@ -172,7 +235,11 @@
         const matchesRoot = candidate.matches(rule.ancestorSelector);
         const matchesParent = parent && parent.matches(rule.ancestorParentSelector);
         if (matchesRoot && matchesParent) {
-          neutralize(candidate, rule.removalReason || "profile-ancestor-rule", true);
+          if (rule.neutralizationStrategy === "preserve-ancestor-hide-children") {
+            preserveAncestorAndHideChildren(candidate, rule);
+          } else {
+            neutralize(candidate, rule.removalReason || "profile-ancestor-rule", true);
+          }
           return;
         }
       } catch (error) {
@@ -240,6 +307,15 @@
   if (!window.__siteShieldInstalled) {
     const observer = new MutationObserver(function(mutations) {
       for (const mutation of mutations) {
+        const mutationElement = mutation.target instanceof HTMLElement
+          ? mutation.target
+          : mutation.target.parentElement;
+        const preservedOwner = mutationElement
+          ? mutationElement.closest("[" + preservedAncestorAttribute + "]")
+          : null;
+        if (preservedOwner) {
+          reconcilePreservedAncestor(preservedOwner);
+        }
         mutation.addedNodes.forEach(function(node) {
           if (node instanceof HTMLElement) {
             inspectElement(node);
@@ -251,6 +327,7 @@
 
     observer.observe(document.documentElement, {
       childList: true,
+      characterData: true,
       subtree: true
     });
 

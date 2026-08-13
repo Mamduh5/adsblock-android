@@ -111,6 +111,10 @@ class FacebookProfileTest {
         )
         assertEquals(4, rule.maxAncestorDepth)
         assertEquals("facebook-sponsored-feed", rule.removalReason)
+        assertEquals(
+            AncestorNeutralizationStrategy.PRESERVE_ANCESTOR_HIDE_CHILDREN,
+            rule.neutralizationStrategy,
+        )
     }
 
     @Test
@@ -128,6 +132,10 @@ class FacebookProfileTest {
             rule.ancestorSelector,
         )
         assertEquals(2, rule.maxAncestorDepth)
+        assertEquals(
+            AncestorNeutralizationStrategy.REMOVE_ANCESTOR,
+            rule.neutralizationStrategy,
+        )
     }
 
     @Test

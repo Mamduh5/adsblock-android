@@ -131,6 +131,8 @@ data class AncestorDomCleanupRule(
     val ancestorParentSelector: String,
     val maxAncestorDepth: Int,
     val removalReason: String,
+    val neutralizationStrategy: AncestorNeutralizationStrategy =
+        AncestorNeutralizationStrategy.REMOVE_ANCESTOR,
 ) {
     init {
         require(markerSelector.isNotBlank())
@@ -145,6 +147,11 @@ data class AncestorDomCleanupRule(
         val normalized = text.trim()
         return markerTextPrefixes.any(normalized::startsWith)
     }
+}
+
+enum class AncestorNeutralizationStrategy(val javascriptValue: String) {
+    REMOVE_ANCESTOR("remove-ancestor"),
+    PRESERVE_ANCESTOR_HIDE_CHILDREN("preserve-ancestor-hide-children"),
 }
 
 sealed class HostPattern {

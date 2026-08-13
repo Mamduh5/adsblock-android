@@ -50,6 +50,7 @@ class DomCleanupRulesTest {
         assertTrue(config.contains("\"ancestorParentSelector\":\".feed\""))
         assertTrue(config.contains("\"maxAncestorDepth\":4"))
         assertTrue(config.contains("\"removalReason\":\"sponsored-fixture\""))
+        assertTrue(config.contains("\"neutralizationStrategy\":\"remove-ancestor\""))
     }
 
     @Test

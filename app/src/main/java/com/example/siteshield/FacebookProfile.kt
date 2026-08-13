@@ -40,6 +40,8 @@ object FacebookProfile {
                 ancestorParentSelector = "[data-mcomponent='MContainer'][data-type='vscroller']",
                 maxAncestorDepth = 4,
                 removalReason = "facebook-sponsored-feed",
+                neutralizationStrategy =
+                    AncestorNeutralizationStrategy.PRESERVE_ANCESTOR_HIDE_CHILDREN,
             ),
             AncestorDomCleanupRule(
                 markerSelector = "[data-mcomponent='ServerTextArea'][data-type='text']",
