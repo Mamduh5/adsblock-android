@@ -16,11 +16,13 @@ class SiteShieldWebViewClient(
     private val context: Context,
     private val settingsStore: SettingsStore,
     private val blockerEngine: GenericBlockerEngine,
+    private val dataSaverModeStore: DataSaverModeStore,
     initialProfile: SiteProfile,
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
-    private val onTopLevelNavigationStarted: () -> Unit,
+    private val onPageUsageCheckpoint: () -> Unit,
+    private val onTopLevelNavigationStarted: (SiteProfile, String?) -> Unit,
 ) : WebViewClient() {
     private val topLevelContext = TopLevelContextStore(
         TopLevelContext(
@@ -70,7 +72,7 @@ class SiteShieldWebViewClient(
         view: WebView,
         request: WebResourceRequest,
     ): WebResourceResponse? {
-        if (!settingsStore.blockerEnabled || request.isForMainFrame) return null
+        if (request.isForMainFrame) return null
 
         val uri = request.url
         val activeContext = topLevelContext.snapshot()
@@ -79,6 +81,28 @@ class SiteShieldWebViewClient(
             activeContext.profile,
             ProfileRequestContext.SUBRESOURCE,
         )
+        val saverDecision = DataSaverEngine.decide(
+            mode = dataSaverModeStore.snapshot(),
+            policy = profile.dataSaverPolicy,
+            request = DataSaverRequestContext(
+                method = request.method,
+                isForMainFrame = request.isForMainFrame,
+                hasGesture = request.hasGesture(),
+                headers = request.requestHeaders.orEmpty(),
+            ),
+        )
+        if (saverDecision is DataSaverDecision.Block) {
+            onEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DATA_SAVER_BLOCK,
+                    message = "[${profile.displayName}] Blocked explicit prefetch",
+                    detail = "ruleId=${saverDecision.ruleId}",
+                ),
+            )
+            return emptyResponse()
+        }
+
+        if (!settingsStore.blockerEnabled) return null
         val decision = blockerEngine.resourceDecision(profile, uri.toString(), activeContext.url)
         if (decision !is BlockDecision.Block) return null
 
@@ -90,7 +114,10 @@ class SiteShieldWebViewClient(
                 detail = "pageType=$pageType, reason=${decision.reason}, ruleId=${decision.ruleId ?: "none"}, url=${uri}",
             ),
         )
-        return WebResourceResponse(
+        return emptyResponse()
+    }
+
+    private fun emptyResponse(): WebResourceResponse = WebResourceResponse(
             "text/plain",
             "utf-8",
             204,
@@ -98,14 +125,13 @@ class SiteShieldWebViewClient(
             mapOf("Cache-Control" to "no-store"),
             ByteArrayInputStream(ByteArray(0)),
         )
-    }
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
         val updatedContext = updateTopLevelContext(url)
         val profile = updatedContext.profile
         val pageType = blockerEngine.classifyPageType(profile, updatedContext.url)
-        onTopLevelNavigationStarted()
+        onTopLevelNavigationStarted(profile, updatedContext.url)
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
@@ -127,6 +153,7 @@ class SiteShieldWebViewClient(
         if (settingsStore.blockerEnabled) {
             onPageLoaded(view)
         }
+        onPageUsageCheckpoint()
     }
 
     override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
@@ -136,7 +163,7 @@ class SiteShieldWebViewClient(
 
         val updatedContext = updateTopLevelContext(url)
         val pageType = blockerEngine.classifyPageType(updatedContext.profile, updatedContext.url)
-        onTopLevelNavigationStarted()
+        onTopLevelNavigationStarted(updatedContext.profile, updatedContext.url)
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
@@ -154,6 +181,7 @@ class SiteShieldWebViewClient(
         if (settingsStore.blockerEnabled) {
             onPageLoaded(view)
         }
+        onPageUsageCheckpoint()
     }
 
     private fun updateTopLevelContext(url: String?): TopLevelContext {

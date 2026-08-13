@@ -100,6 +100,13 @@ object PalworldGgProfile {
             PageType.INTERACTIVE_MAP to PagePolicy(domRules = mapDomRules),
             PageType.INTERACTIVE_TOOL to PagePolicy(domRules = toolDomRules),
         ),
+        dataSaverPolicy = DataSaverPolicy(
+            blockNetworkImagesInMax = true,
+            preserveMaxImagesForPageTypes = setOf(
+                PageType.INTERACTIVE_MAP,
+                PageType.INTERACTIVE_TOOL,
+            ),
+        ),
         allowThirdPartyCookies = false,
     )
 }

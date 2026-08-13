@@ -5,7 +5,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 
 object WebViewConfigurator {
-    fun configure(webView: WebView, profile: SiteProfile) {
+    fun configure(webView: WebView, profile: SiteProfile, dataSaverMode: DataSaverMode) {
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, profile.allowThirdPartyCookies)
@@ -15,6 +15,7 @@ object WebViewConfigurator {
             javaScriptEnabled = true
             domStorageEnabled = true
             loadsImagesAutomatically = true
+            blockNetworkImage = profile.dataSaverPolicy.blockNetworkImages(dataSaverMode, PageType.UNKNOWN)
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             mediaPlaybackRequiresUserGesture = true
             setSupportMultipleWindows(false)
@@ -33,5 +34,17 @@ object WebViewConfigurator {
 
     fun applyCookiePolicy(webView: WebView, profile: SiteProfile) {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, profile.allowThirdPartyCookies)
+    }
+
+    fun applyDataSaverPolicy(
+        webView: WebView,
+        mode: DataSaverMode,
+        profile: SiteProfile,
+        pageType: PageType,
+    ) {
+        webView.settings.apply {
+            mediaPlaybackRequiresUserGesture = true
+            blockNetworkImage = profile.dataSaverPolicy.blockNetworkImages(mode, pageType)
+        }
     }
 }

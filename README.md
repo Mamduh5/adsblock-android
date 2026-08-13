@@ -16,6 +16,18 @@ Native Kotlin Android app for dedicated, profile-based protected WebView browsin
 - Cookies stay enabled, while third-party cookies are profile-controlled and disabled by default.
 - Manual suspicious site data cleanup for cookie, localStorage, and sessionStorage keys matching the active profile.
 - Local-only blocker/debug/profile settings. No telemetry, analytics SDKs, remote rule loading, VPN, AccessibilityService, or JavaScript bridge.
+- Local Data Saver modes: OFF, BALANCED, and MAX. BALANCED blocks only requests explicitly marked as prefetch and retains gesture-required media playback; MAX may additionally suppress network images according to each profile's policy.
+- A session data meter based on Android per-UID RX/TX counters, including profile-active interval attribution. It reports actual app-UID traffic used, never estimated bytes saved.
+
+## Data Saver semantics
+
+- Fresh installs start in BALANCED. Existing installs without a saved Data Saver preference migrate to OFF so an upgrade does not silently change browsing behavior.
+- OFF adds no saver restrictions and is independent from the blocker toggle.
+- BALANCED preserves network images and selected media playback. Supported-site primary resources are not classified by filename or host as disposable media.
+- MAX uses WebView's native network-image setting only where the active profile/page policy permits it. Manga chapter pages, Palworld map/tools, and YouTube watch pages protect their primary images.
+- Changing mode does not reload the page. New and pending requests follow the updated WebView setting, and leaving MAX immediately restores normal network-image loading.
+- Session usage comes from cumulative `TrafficStats` counters for Site Shield's UID. Per-profile numbers attribute counter deltas to the profile active during that interval; they are not per-request measurements.
+- Usage remains on-device. Data Saver adds no VPN, proxy, DNS filtering, telemetry, cloud service, or Thinpipe integration.
 
 ## Run In Android Studio
 

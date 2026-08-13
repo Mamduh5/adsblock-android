@@ -108,6 +108,9 @@ object FacebookProfile {
             blockOffsiteMainFrameNavigations = false,
             promptForOffsiteMainFrameNavigations = true,
         ),
+        dataSaverPolicy = DataSaverPolicy(
+            blockNetworkImagesInMax = true,
+        ),
         protectedCookieKeyPatterns = listOf(sessionKeyPattern),
         protectedStorageKeyPatterns = listOf(sessionKeyPattern),
         allowThirdPartyCookies = false,

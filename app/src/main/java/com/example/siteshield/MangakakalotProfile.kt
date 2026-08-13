@@ -193,6 +193,10 @@ object MangakakalotProfile {
                 domRules = chapterDomRules,
             ),
         ),
+        dataSaverPolicy = DataSaverPolicy(
+            blockNetworkImagesInMax = true,
+            preserveMaxImagesForPageTypes = setOf(PageType.CHAPTER_READER),
+        ),
         suspiciousCookieKeyPatterns = suspiciousEvidenceKeys,
         suspiciousStorageKeyPatterns = suspiciousEvidenceKeys,
         protectedCookieKeyPatterns = protectedAccountKeys,

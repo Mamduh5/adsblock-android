@@ -31,6 +31,8 @@ import android.widget.Toast
 class MainActivity : Activity() {
     private val blockerEngine = GenericBlockerEngine()
     private lateinit var settingsStore: SettingsStore
+    private lateinit var dataSaverModeStore: DataSaverModeStore
+    private lateinit var dataUsageTracker: DataUsageTracker
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var domainText: TextView
@@ -43,6 +45,8 @@ class MainActivity : Activity() {
     private lateinit var shieldPanel: LinearLayout
     private lateinit var debugOverlay: FrameLayout
     private lateinit var shieldControl: Button
+    private lateinit var dataSaverButton: Button
+    private lateinit var dataUsageText: TextView
     private val eventLog = DebugEventLog(MAX_EVENTS)
     private var debugFilter: DebugEventCategory? = null
     private var shieldUiState = ShieldUiState()
@@ -52,12 +56,14 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         settingsStore = SettingsStore(this)
         activeProfile = SiteProfileRegistry.byId(settingsStore.selectedProfileId)
+        dataSaverModeStore = DataSaverModeStore(settingsStore.dataSaverMode)
+        dataUsageTracker = DataUsageTracker(AndroidNetworkCounterProvider, activeProfile.id)
 
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         webView = WebView(this)
-        WebViewConfigurator.configure(webView, activeProfile)
+        WebViewConfigurator.configure(webView, activeProfile, dataSaverModeStore.snapshot())
 
         val dataCleaner = SiteDataCleaner(
             webView = webView,
@@ -73,6 +79,12 @@ class MainActivity : Activity() {
                 category = DebugEventCategory.PROFILE,
                 message = "Active profile: ${activeProfile.displayName}",
                 detail = "id=${activeProfile.id}",
+            ),
+        )
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.DATA_SAVER,
+                message = "Data Saver mode=${dataSaverModeStore.snapshot().name}",
             ),
         )
 
@@ -119,11 +131,13 @@ class MainActivity : Activity() {
             context = this,
             settingsStore = settingsStore,
             blockerEngine = blockerEngine,
+            dataSaverModeStore = dataSaverModeStore,
             initialProfile = activeProfile,
             onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
             onPageLoaded = ::injectDomCleanup,
-            onTopLevelNavigationStarted = ::collapseShieldPanel,
+            onPageUsageCheckpoint = ::updateDataUsageReadout,
+            onTopLevelNavigationStarted = ::onTopLevelNavigationStarted,
         )
 
         if (savedInstanceState == null) {
@@ -151,6 +165,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        dataUsageTracker.flush()
         webView.destroy()
         super.onDestroy()
     }
@@ -216,6 +231,33 @@ class MainActivity : Activity() {
             dataCleaner.cleanSuspiciousSiteData()
             Toast.makeText(this, "Suspicious site data cleanup ran", Toast.LENGTH_SHORT).show()
         }
+
+        dataSaverButton = largeButton(dataSaverButtonLabel()) {
+            val updatedMode = dataSaverModeStore.snapshot().next()
+            settingsStore.dataSaverMode = updatedMode
+            dataSaverModeStore.update(updatedMode)
+            applyDataSaverPolicy(activeProfile, webView.url)
+            dataSaverButton.text = dataSaverButtonLabel()
+            updateDataUsageReadout()
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DATA_SAVER,
+                    message = "Data Saver mode=${updatedMode.name}",
+                    detail = "networkImagesBlocked=${webView.settings.blockNetworkImage}",
+                ),
+            )
+            if (updatedMode == DataSaverMode.MAX) {
+                Toast.makeText(this, "MAX may reduce page images", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        dataUsageText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(dp(12), dp(2), dp(12), dp(4))
+            maxLines = 2
+        }
+        updateDataUsageReadout()
 
         val debugSwitch = Switch(this).apply {
             text = "Debug updates"
@@ -286,6 +328,7 @@ class MainActivity : Activity() {
 
         val openDebugButton = largeButton("Open Debug Logs") {
             shieldUiState = shieldUiState.openDebug()
+            updateDataUsageReadout()
             updateRuntimeMarkers()
             updateDebugLog()
             syncShieldUi()
@@ -318,6 +361,8 @@ class MainActivity : Activity() {
             ))
             addView(controlRow(cleanupButton, dataCleanButton))
             addView(blockerSwitch)
+            addView(dataSaverButton)
+            addView(dataUsageText)
             addView(debugSwitch)
             addView(openDebugButton)
             addView(closeShieldButton)
@@ -419,6 +464,11 @@ class MainActivity : Activity() {
         syncShieldUi()
     }
 
+    private fun onTopLevelNavigationStarted(profile: SiteProfile, url: String?) {
+        applyDataSaverPolicy(profile, url)
+        collapseShieldPanel()
+    }
+
     private fun syncShieldUi() {
         if (!::shieldControl.isInitialized || !::shieldPanel.isInitialized || !::debugOverlay.isInitialized) return
         val debugOpen = shieldUiState.debugOverlay == DebugOverlayState.OPEN
@@ -429,6 +479,33 @@ class MainActivity : Activity() {
             shieldUiState.visibility == ShieldVisibility.VISIBLE && !debugOpen
         ) View.VISIBLE else View.GONE
         shieldControl.text = if (panelOpen) "Hide" else "Shield"
+        if (panelOpen) updateDataUsageReadout()
+    }
+
+    private fun dataSaverButtonLabel(): String =
+        "Data Saver: ${dataSaverModeStore.snapshot().displayName}"
+
+    private fun applyDataSaverPolicy(profile: SiteProfile, url: String?) {
+        val pageType = blockerEngine.classifyPageType(profile, url ?: profile.startUrl)
+        WebViewConfigurator.applyDataSaverPolicy(
+            webView = webView,
+            mode = dataSaverModeStore.snapshot(),
+            profile = profile,
+            pageType = pageType,
+        )
+    }
+
+    private fun updateDataUsageReadout() {
+        if (!::dataUsageText.isInitialized || !::dataUsageTracker.isInitialized) return
+        val usage = dataUsageTracker.snapshot()
+        dataUsageText.text = if (!usage.countersSupported) {
+            "Session data: unavailable"
+        } else {
+            val activeUsage = usage.byProfile[activeProfile.id] ?: DataUsage()
+            "Session data: ${formatDataBytes(usage.session.totalBytes)}\n" +
+                "RX ${formatDataBytes(usage.session.rxBytes)}  TX ${formatDataBytes(usage.session.txBytes)}" +
+                "  ${activeProfile.displayName} ${formatDataBytes(activeUsage.totalBytes)}"
+        }
     }
 
     private fun smallButton(label: String, onClick: () -> Unit): Button =
@@ -519,9 +596,11 @@ class MainActivity : Activity() {
 
     private fun setActiveProfile(profile: SiteProfile) {
         if (::activeProfile.isInitialized && activeProfile.id == profile.id) return
+        dataUsageTracker.switchProfile(profile.id)
         activeProfile = profile
         settingsStore.selectedProfileId = profile.id
         WebViewConfigurator.applyCookiePolicy(webView, profile)
+        applyDataSaverPolicy(profile, webView.url ?: profile.startUrl)
         if (::profileButton.isInitialized) {
             profileButton.text = "Profile: ${profile.displayName}"
         }
@@ -535,6 +614,7 @@ class MainActivity : Activity() {
             ),
         )
         updateRuntimeMarkers()
+        updateDataUsageReadout()
     }
 
     private fun updateHeader(title: String?) {
@@ -574,7 +654,8 @@ class MainActivity : Activity() {
         val storageRan = recent.any {
             it.category == DebugEventCategory.STORAGE_CLEANUP || it.category == DebugEventCategory.COOKIE_CLEANUP
         }
-        markerText.text = "Profile=${activeProfile.id} PageType=$pageType OffsiteStrict=${policy.blockOffsiteMainFrameNavigations} " +
+        markerText.text = "Profile=${activeProfile.id} PageType=$pageType DataSaver=${dataSaverModeStore.snapshot().name} " +
+            "OffsiteStrict=${policy.blockOffsiteMainFrameNavigations} " +
             "OffsiteNavDenied=$navDenied ReaderCleanupRan=$cleanupRan StorageCleanupRan=$storageRan"
     }
 

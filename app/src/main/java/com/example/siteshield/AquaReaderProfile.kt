@@ -155,6 +155,10 @@ object AquaReaderProfile {
         pagePolicies = mapOf(
             PageType.CHAPTER_READER to PagePolicy(domRules = readerDomRules),
         ),
+        dataSaverPolicy = DataSaverPolicy(
+            blockNetworkImagesInMax = true,
+            preserveMaxImagesForPageTypes = setOf(PageType.CHAPTER_READER),
+        ),
         allowThirdPartyCookies = false,
         warnOnSuspiciousNavigation = false,
     )

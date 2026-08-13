@@ -13,6 +13,8 @@ enum class DebugEventCategory {
     STORAGE_CLEANUP,
     COOKIE_CLEANUP,
     POLICY_DECISION,
+    DATA_SAVER,
+    DATA_SAVER_BLOCK,
 }
 
 data class DebugEvent(

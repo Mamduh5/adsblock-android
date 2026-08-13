@@ -103,6 +103,10 @@ object YouTubeProfile {
         pagePolicies = mapOf(
             PageType.VIDEO_WATCH to PagePolicy(domRules = playerDomRules),
         ),
+        dataSaverPolicy = DataSaverPolicy(
+            blockNetworkImagesInMax = true,
+            preserveMaxImagesForPageTypes = setOf(PageType.VIDEO_WATCH),
+        ),
         protectedCookieKeyPatterns = listOf(protectedAccountKeyRegex()),
         protectedStorageKeyPatterns = listOf(protectedAccountKeyRegex()),
         allowThirdPartyCookies = false,
