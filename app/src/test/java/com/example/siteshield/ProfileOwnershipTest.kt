@@ -204,6 +204,52 @@ class ProfileOwnershipTest {
         assertEquals("aquareader", selected.id)
     }
 
+    @Test
+    fun `main frame navigation switches to and from youtube`() {
+        val productionEngine = GenericBlockerEngine()
+
+        listOf(
+            MangakakalotProfile.profile,
+            PalworldGgProfile.profile,
+            AquaReaderProfile.profile,
+        ).forEach { source ->
+            assertEquals(
+                "youtube",
+                productionEngine.profileForRequest(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    source,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+
+        listOf(
+            "https://www.mangakakalot.gg/" to "mangakakalot",
+            "https://palworld.gg/" to "palworld-gg",
+            "https://aquareader.org/" to "aquareader",
+        ).forEach { (url, expected) ->
+            assertEquals(
+                expected,
+                productionEngine.profileForRequest(
+                    url,
+                    YouTubeProfile.profile,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+    }
+
+    @Test
+    fun `youtube media subresources retain youtube top level ownership`() {
+        val selected = GenericBlockerEngine().profileForRequest(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?id=content",
+            YouTubeProfile.profile,
+            ProfileRequestContext.SUBRESOURCE,
+        )
+
+        assertEquals("youtube", selected.id)
+    }
+
     private fun profile(
         id: String,
         allowedHosts: List<HostPattern>,

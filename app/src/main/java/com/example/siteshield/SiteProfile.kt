@@ -25,6 +25,7 @@ enum class PageType {
     CHAPTER_READER,
     INTERACTIVE_MAP,
     INTERACTIVE_TOOL,
+    VIDEO_WATCH,
     UNKNOWN,
 }
 

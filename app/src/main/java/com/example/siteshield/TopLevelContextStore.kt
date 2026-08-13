@@ -16,3 +16,6 @@ class TopLevelContextStore(initialContext: TopLevelContext) {
         context.set(updatedContext)
     }
 }
+
+internal fun isNewTopLevelHistoryUrl(previousUrl: String?, updatedUrl: String?): Boolean =
+    !updatedUrl.isNullOrBlank() && updatedUrl != previousUrl

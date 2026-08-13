@@ -29,6 +29,7 @@ object SiteProfileRegistry {
             MangakakalotProfile.profile,
             PalworldGgProfile.profile,
             AquaReaderProfile.profile,
+            YouTubeProfile.profile,
         ),
     )
 

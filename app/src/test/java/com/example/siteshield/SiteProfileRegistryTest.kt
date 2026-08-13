@@ -66,8 +66,30 @@ class SiteProfileRegistryTest {
     @Test
     fun `selectable profiles include all production sites in order`() {
         assertEquals(
-            listOf("mangakakalot", "palworld-gg", "aquareader"),
+            listOf("mangakakalot", "palworld-gg", "aquareader", "youtube"),
             SiteProfileRegistry.selectableProfiles().map { it.id },
         )
+    }
+
+    @Test
+    fun `matches youtube navigation hosts and rejects lookalikes`() {
+        listOf(
+            "https://youtube.com/",
+            "https://www.youtube.com/watch?v=abc",
+            "https://m.youtube.com/results?search_query=test",
+            "https://youtu.be/abc",
+        ).forEach { url ->
+            assertEquals(url, "youtube", SiteProfileRegistry.match(url).id)
+        }
+
+        listOf(
+            "https://youtube.example.com/",
+            "https://youtube.com.scam.example/",
+            "https://fake-youtube.com/",
+            "https://youtu.be.example.com/",
+            "https://rr1---sn.example.c.youtube.com/videoplayback",
+        ).forEach { url ->
+            assertFalse(SiteProfileRegistry.match(url).id == "youtube")
+        }
     }
 }

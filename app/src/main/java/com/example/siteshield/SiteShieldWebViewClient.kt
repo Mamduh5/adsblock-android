@@ -129,6 +129,33 @@ class SiteShieldWebViewClient(
         }
     }
 
+    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        val previousContext = topLevelContext.snapshot()
+        if (!isNewTopLevelHistoryUrl(previousContext.url, url)) return
+
+        val updatedContext = updateTopLevelContext(url)
+        val pageType = blockerEngine.classifyPageType(updatedContext.profile, updatedContext.url)
+        onTopLevelNavigationStarted()
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.PAGE_TYPE,
+                message = "[${updatedContext.profile.displayName}] History updated ${url.orEmpty()}",
+                detail = "detected=$pageType, reload=$isReload",
+            ),
+        )
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.POLICY_DECISION,
+                message = "Active merged policy",
+                detail = blockerEngine.describePolicy(updatedContext.profile, pageType),
+            ),
+        )
+        if (settingsStore.blockerEnabled) {
+            onPageLoaded(view)
+        }
+    }
+
     private fun updateTopLevelContext(url: String?): TopLevelContext {
         val previousContext = topLevelContext.snapshot()
         val updatedUrl = url ?: previousContext.url

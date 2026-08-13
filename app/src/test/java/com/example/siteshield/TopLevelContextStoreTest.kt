@@ -60,6 +60,17 @@ class TopLevelContextStoreTest {
         assertFalse(invalidPairObserved.get())
     }
 
+    @Test
+    fun `history updates only react to a distinct nonblank top level url`() {
+        assertFalse(isNewTopLevelHistoryUrl(contextA.url, null))
+        assertFalse(isNewTopLevelHistoryUrl(contextA.url, ""))
+        assertFalse(isNewTopLevelHistoryUrl(contextA.url, contextA.url))
+        assertEquals(
+            true,
+            isNewTopLevelHistoryUrl(contextA.url, "https://site-a.example/watch?v=2"),
+        )
+    }
+
     private fun profile(id: String): SiteProfile =
         SiteProfile(
             id = id,
