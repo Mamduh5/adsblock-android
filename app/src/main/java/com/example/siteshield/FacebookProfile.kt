@@ -18,6 +18,9 @@ object FacebookProfile {
     )
 
     private val baselineDomRules = DomCleanupRules(
+        suspiciousSelectors = listOf(
+            "[data-mcomponent='MContainer'][data-type='container'][data-comp-id='22222']",
+        ),
         preserveSelectors = listOf(
             "[role='feed']",
             "[role='article']",
@@ -28,6 +31,26 @@ object FacebookProfile {
             "input[name='email']",
             "input[name='pass']",
             "video",
+        ),
+        ancestorCleanupRules = listOf(
+            AncestorDomCleanupRule(
+                markerSelector = "[data-mcomponent='TextArea'][data-type='text']",
+                markerTextPrefixes = listOf("ที่ได้รับการสนับสนุน"),
+                ancestorSelector = "[data-mcomponent='MContainer'][data-type='container']",
+                ancestorParentSelector = "[data-mcomponent='MContainer'][data-type='vscroller']",
+                maxAncestorDepth = 4,
+                removalReason = "facebook-sponsored-feed",
+            ),
+            AncestorDomCleanupRule(
+                markerSelector = "[data-mcomponent='ServerTextArea'][data-type='text']",
+                markerTextPrefixes = listOf("เปิดแอพ"),
+                ancestorSelector =
+                    "[role='button'][data-mcomponent='MContainer'][data-type='container']",
+                ancestorParentSelector =
+                    "[data-mcomponent='MContainer'][data-type='container']",
+                maxAncestorDepth = 2,
+                removalReason = "facebook-app-promo-reels",
+            ),
         ),
         enableGenericOverlayHeuristics = false,
     )

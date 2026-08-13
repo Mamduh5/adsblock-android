@@ -2,6 +2,7 @@
   const config = window.__siteShieldDomConfig || {};
   const suspiciousSelectors = Array.isArray(config.suspiciousSelectors) ? config.suspiciousSelectors : [];
   const preserveSelectors = Array.isArray(config.preserveSelectors) ? config.preserveSelectors : [];
+  const ancestorCleanupRules = Array.isArray(config.ancestorCleanupRules) ? config.ancestorCleanupRules : [];
   const highZIndexThreshold = Number.isFinite(config.highZIndexThreshold) ? config.highZIndexThreshold : 999;
   const overlayViewportCoverageThreshold = Number.isFinite(config.overlayViewportCoverageThreshold)
     ? config.overlayViewportCoverageThreshold
@@ -54,11 +55,11 @@
     return false;
   }
 
-  function neutralize(element, reason) {
+  function neutralize(element, reason, preciseStructuralMatch) {
     if (!element || element === document.documentElement || element === document.body) {
       return;
     }
-    if (isPreserved(element)) {
+    if (!preciseStructuralMatch && isPreserved(element)) {
       return;
     }
     element.setAttribute("data-site-shield-removed", reason);
@@ -154,6 +155,53 @@
     removeEmptySuspiciousWrapper(element);
   }
 
+  function applyAncestorCleanupRule(marker, rule) {
+    if (!(marker instanceof HTMLElement) || !rule || !Array.isArray(rule.markerTextPrefixes)) {
+      return;
+    }
+    const markerText = (marker.textContent || "").trim();
+    if (!rule.markerTextPrefixes.some(function(prefix) { return prefix && markerText.startsWith(prefix); })) {
+      return;
+    }
+
+    const maxDepth = Math.max(0, Math.min(12, Number(rule.maxAncestorDepth) || 0));
+    let candidate = marker;
+    for (let depth = 0; candidate && depth <= maxDepth; depth += 1) {
+      try {
+        const parent = candidate.parentElement;
+        const matchesRoot = candidate.matches(rule.ancestorSelector);
+        const matchesParent = parent && parent.matches(rule.ancestorParentSelector);
+        if (matchesRoot && matchesParent) {
+          neutralize(candidate, rule.removalReason || "profile-ancestor-rule", true);
+          return;
+        }
+      } catch (error) {
+        console.info("[SiteShield] ignored invalid ancestor cleanup rule");
+        return;
+      }
+      candidate = candidate.parentElement;
+    }
+  }
+
+  function applyAncestorCleanupRules(scope) {
+    for (const rule of ancestorCleanupRules) {
+      try {
+        const markers = [];
+        if (scope instanceof HTMLElement && scope.matches(rule.markerSelector)) {
+          markers.push(scope);
+        }
+        scope.querySelectorAll(rule.markerSelector).forEach(function(marker) {
+          markers.push(marker);
+        });
+        markers.forEach(function(marker) {
+          applyAncestorCleanupRule(marker, rule);
+        });
+      } catch (error) {
+        console.info("[SiteShield] ignored invalid ancestor marker selector");
+      }
+    }
+  }
+
   function scan(root) {
     const scope = root && root.querySelectorAll ? root : document;
     scope.querySelectorAll("iframe, [class], [id], a, button, [role='button']").forEach(inspectElement);
@@ -166,6 +214,7 @@
         console.info("[SiteShield] ignored invalid selector");
       }
     }
+    applyAncestorCleanupRules(scope);
   }
 
   function blockClickTrap(event) {

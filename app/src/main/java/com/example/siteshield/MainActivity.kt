@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -52,6 +53,9 @@ class MainActivity : Activity() {
         settingsStore = SettingsStore(this)
         activeProfile = SiteProfileRegistry.byId(settingsStore.selectedProfileId)
 
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
         webView = WebView(this)
         WebViewConfigurator.configure(webView, activeProfile)
 
@@ -385,6 +389,7 @@ class MainActivity : Activity() {
         root.setOnApplyWindowInsetsListener { _, insets ->
             val contentParams = contentLayer.layoutParams as FrameLayout.LayoutParams
             contentParams.topMargin = topSafeInset(insets)
+            contentParams.bottomMargin = navigationBarBottomInset(insets)
             contentLayer.layoutParams = contentParams
             val params = shieldControl.layoutParams as FrameLayout.LayoutParams
             params.bottomMargin = navigationBarBottomInset(insets) + dp(28)
@@ -617,11 +622,11 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION")
     private fun navigationBarBottomInset(insets: WindowInsets): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        bottomSafeInsetPx(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             insets.getInsets(WindowInsets.Type.navigationBars()).bottom
         } else {
             insets.systemWindowInsetBottom
-        }
+        })
 
     companion object {
         private const val MAX_EVENTS = 200
@@ -632,6 +637,9 @@ class MainActivity : Activity() {
 internal fun topSafeInsetPx(statusBarTop: Int, displayCutoutTop: Int): Int =
     maxOf(statusBarTop, displayCutoutTop)
 
+internal fun bottomSafeInsetPx(navigationBarBottom: Int): Int =
+    navigationBarBottom.coerceAtLeast(0)
+
 internal fun DomCleanupRules.toJavascriptObject(): String =
     buildString {
         append("{")
@@ -639,6 +647,8 @@ internal fun DomCleanupRules.toJavascriptObject(): String =
         append(suspiciousSelectors.toJavascriptArray())
         append(",\"preserveSelectors\":")
         append(preserveSelectors.toJavascriptArray())
+        append(",\"ancestorCleanupRules\":")
+        append(ancestorCleanupRules.toJavascriptRuleArray())
         append(",\"suspiciousClassTokens\":")
         append(suspiciousClassTokens.toJavascriptArray())
         append(",\"suspiciousUrlTokens\":")
@@ -658,6 +668,25 @@ internal fun DomCleanupRules.toJavascriptObject(): String =
 
 private fun List<String>.toJavascriptArray(): String =
     joinToString(prefix = "[", postfix = "]") { it.toJavascriptString() }
+
+private fun List<AncestorDomCleanupRule>.toJavascriptRuleArray(): String =
+    joinToString(prefix = "[", postfix = "]") { rule ->
+        buildString {
+            append("{\"markerSelector\":")
+            append(rule.markerSelector.toJavascriptString())
+            append(",\"markerTextPrefixes\":")
+            append(rule.markerTextPrefixes.toJavascriptArray())
+            append(",\"ancestorSelector\":")
+            append(rule.ancestorSelector.toJavascriptString())
+            append(",\"ancestorParentSelector\":")
+            append(rule.ancestorParentSelector.toJavascriptString())
+            append(",\"maxAncestorDepth\":")
+            append(rule.maxAncestorDepth)
+            append(",\"removalReason\":")
+            append(rule.removalReason.toJavascriptString())
+            append("}")
+        }
+    }
 
 private fun String.toJavascriptString(): String =
     buildString {

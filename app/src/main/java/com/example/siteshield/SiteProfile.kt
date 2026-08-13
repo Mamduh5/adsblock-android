@@ -98,6 +98,7 @@ data class RequestRule(
 data class DomCleanupRules(
     val suspiciousSelectors: List<String> = emptyList(),
     val preserveSelectors: List<String> = emptyList(),
+    val ancestorCleanupRules: List<AncestorDomCleanupRule> = emptyList(),
     val suspiciousClassTokens: List<String> = emptyList(),
     val suspiciousUrlTokens: List<String> = emptyList(),
     val baitTextTokens: List<String> = emptyList(),
@@ -110,6 +111,7 @@ data class DomCleanupRules(
         DomCleanupRules(
             suspiciousSelectors = suspiciousSelectors + override.suspiciousSelectors,
             preserveSelectors = preserveSelectors + override.preserveSelectors,
+            ancestorCleanupRules = ancestorCleanupRules + override.ancestorCleanupRules,
             suspiciousClassTokens = suspiciousClassTokens + override.suspiciousClassTokens,
             suspiciousUrlTokens = suspiciousUrlTokens + override.suspiciousUrlTokens,
             baitTextTokens = baitTextTokens + override.baitTextTokens,
@@ -120,6 +122,29 @@ data class DomCleanupRules(
             enableGenericOverlayHeuristics =
                 enableGenericOverlayHeuristics && override.enableGenericOverlayHeuristics,
         )
+}
+
+data class AncestorDomCleanupRule(
+    val markerSelector: String,
+    val markerTextPrefixes: List<String>,
+    val ancestorSelector: String,
+    val ancestorParentSelector: String,
+    val maxAncestorDepth: Int,
+    val removalReason: String,
+) {
+    init {
+        require(markerSelector.isNotBlank())
+        require(markerTextPrefixes.isNotEmpty() && markerTextPrefixes.none { it.isBlank() })
+        require(ancestorSelector.isNotBlank())
+        require(ancestorParentSelector.isNotBlank())
+        require(maxAncestorDepth in 0..12)
+        require(removalReason.isNotBlank())
+    }
+
+    internal fun matchesMarkerText(text: String): Boolean {
+        val normalized = text.trim()
+        return markerTextPrefixes.any(normalized::startsWith)
+    }
 }
 
 sealed class HostPattern {

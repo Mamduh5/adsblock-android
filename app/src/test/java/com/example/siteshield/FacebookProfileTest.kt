@@ -78,7 +78,10 @@ class FacebookProfileTest {
     fun `cleanup avoids unproven facebook ad and overlay heuristics`() {
         val rules = engine.domRulesForUrl(profile, "https://www.facebook.com/")
 
-        assertTrue(rules.suspiciousSelectors.isEmpty())
+        assertEquals(
+            listOf("[data-mcomponent='MContainer'][data-type='container'][data-comp-id='22222']"),
+            rules.suspiciousSelectors,
+        )
         assertTrue(rules.suspiciousClassTokens.isEmpty())
         assertTrue(rules.suspiciousUrlTokens.isEmpty())
         assertTrue(rules.baitTextTokens.isEmpty())
@@ -88,6 +91,55 @@ class FacebookProfileTest {
         assertTrue(rules.preserveSelectors.contains("[role='dialog']"))
         assertTrue(rules.preserveSelectors.contains("video"))
         assertFalse(rules.enableGenericOverlayHeuristics)
+    }
+
+    @Test
+    fun `observed sponsored marker resolves only through bounded feed item configuration`() {
+        val rule = engine.domRulesForUrl(profile, "https://www.facebook.com/")
+            .ancestorCleanupRules
+            .single { it.removalReason == "facebook-sponsored-feed" }
+
+        assertTrue(rule.matchesMarkerText("ที่ได้รับการสนับสนุน\uDB81\uDF8B\uDB85\uDE77"))
+        assertFalse(rule.matchesMarkerText("Suggested for you"))
+        assertFalse(rule.matchesMarkerText("People you may know"))
+        assertFalse(rule.matchesMarkerText("ordinary post containing Sponsored discussion"))
+        assertEquals("[data-mcomponent='TextArea'][data-type='text']", rule.markerSelector)
+        assertEquals("[data-mcomponent='MContainer'][data-type='container']", rule.ancestorSelector)
+        assertEquals(
+            "[data-mcomponent='MContainer'][data-type='vscroller']",
+            rule.ancestorParentSelector,
+        )
+        assertEquals(4, rule.maxAncestorDepth)
+        assertEquals("facebook-sponsored-feed", rule.removalReason)
+    }
+
+    @Test
+    fun `observed reels open app marker resolves only to its button`() {
+        val rule = engine.domRulesForUrl(profile, "https://www.facebook.com/reel/123")
+            .ancestorCleanupRules
+            .single { it.removalReason == "facebook-app-promo-reels" }
+
+        assertTrue(rule.matchesMarkerText("เปิดแอพ"))
+        assertFalse(rule.matchesMarkerText("เปิด"))
+        assertFalse(rule.matchesMarkerText("Install"))
+        assertEquals("[data-mcomponent='ServerTextArea'][data-type='text']", rule.markerSelector)
+        assertEquals(
+            "[role='button'][data-mcomponent='MContainer'][data-type='container']",
+            rule.ancestorSelector,
+        )
+        assertEquals(2, rule.maxAncestorDepth)
+    }
+
+    @Test
+    fun `open app promo selector does not target ordinary facebook controls`() {
+        val selector = engine.domRulesForUrl(profile, "https://www.facebook.com/")
+            .suspiciousSelectors
+            .single()
+
+        assertFalse(selector.contains("role='button'"))
+        assertFalse(selector.contains("Open app"))
+        assertFalse(selector.contains("เปิดแอพ"))
+        assertFalse(selector.contains("href"))
     }
 
     @Test
