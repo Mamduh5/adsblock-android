@@ -28,6 +28,7 @@ object SiteProfileRegistry {
         supportedProfiles = listOf(
             MangakakalotProfile.profile,
             PalworldGgProfile.profile,
+            AquaReaderProfile.profile,
         ),
     )
 

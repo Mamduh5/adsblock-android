@@ -50,9 +50,23 @@ class SiteProfileRegistryTest {
     }
 
     @Test
-    fun `selectable profiles include both production sites`() {
+    fun `matches aquareader and rejects lookalikes`() {
+        assertEquals("aquareader", SiteProfileRegistry.match("https://aquareader.org/manga/").id)
+        assertEquals("aquareader", SiteProfileRegistry.match("https://www.aquareader.org/").id)
+
+        listOf(
+            "https://aquareader.org.example.com/",
+            "https://fake-aquareader.org/",
+            "https://aquareader.org.scam.example/",
+        ).forEach { url ->
+            assertFalse(SiteProfileRegistry.match(url).id == "aquareader")
+        }
+    }
+
+    @Test
+    fun `selectable profiles include all production sites in order`() {
         assertEquals(
-            listOf("mangakakalot", "palworld-gg"),
+            listOf("mangakakalot", "palworld-gg", "aquareader"),
             SiteProfileRegistry.selectableProfiles().map { it.id },
         )
     }

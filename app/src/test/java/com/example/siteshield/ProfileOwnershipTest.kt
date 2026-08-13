@@ -163,6 +163,47 @@ class ProfileOwnershipTest {
         )
     }
 
+    @Test
+    fun `main frame navigation switches to and from aquareader`() {
+        val productionEngine = GenericBlockerEngine()
+
+        listOf(MangakakalotProfile.profile, PalworldGgProfile.profile).forEach { source ->
+            assertEquals(
+                "aquareader",
+                productionEngine.profileForRequest(
+                    "https://aquareader.org/manga/hello-mr-veterinarian/",
+                    source,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+
+        listOf(
+            "https://www.mangakakalot.gg/" to "mangakakalot",
+            "https://palworld.gg/" to "palworld-gg",
+        ).forEach { (url, expected) ->
+            assertEquals(
+                expected,
+                productionEngine.profileForRequest(
+                    url,
+                    AquaReaderProfile.profile,
+                    ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+                ).id,
+            )
+        }
+    }
+
+    @Test
+    fun `aquareader subresources retain aquareader top level ownership`() {
+        val selected = GenericBlockerEngine().profileForRequest(
+            "https://cdn.example.org/chapter/page-001.webp",
+            AquaReaderProfile.profile,
+            ProfileRequestContext.SUBRESOURCE,
+        )
+
+        assertEquals("aquareader", selected.id)
+    }
+
     private fun profile(
         id: String,
         allowedHosts: List<HostPattern>,
