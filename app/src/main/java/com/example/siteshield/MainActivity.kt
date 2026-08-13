@@ -16,6 +16,7 @@ import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -35,8 +36,12 @@ class MainActivity : Activity() {
     private lateinit var debugTools: LinearLayout
     private lateinit var markerText: TextView
     private lateinit var filterButton: Button
+    private lateinit var controlScroller: HorizontalScrollView
+    private lateinit var readerControl: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
     private var debugFilter: DebugEventCategory? = null
+    private var browserUiMode = BrowserUiMode.NORMAL
+    private var readerControlsExpanded = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,6 +115,7 @@ class MainActivity : Activity() {
             onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
             onPageLoaded = ::injectDomCleanup,
+            onPageTypeChanged = ::applyBrowserUiMode,
         )
 
         if (savedInstanceState == null) {
@@ -139,10 +145,18 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(dataCleaner: SiteDataCleaner): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val root = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+
+        val browserColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
@@ -205,8 +219,7 @@ class MainActivity : Activity() {
             isChecked = settingsStore.debugEnabled
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.debugEnabled = enabled
-                debugPanel.visibility = if (enabled) View.VISIBLE else View.GONE
-                debugTools.visibility = if (enabled) View.VISIBLE else View.GONE
+                syncBrowserChromeVisibility()
                 updateDebugLog()
             }
         }
@@ -269,19 +282,54 @@ class MainActivity : Activity() {
             1f,
         )
 
-        val controlScroller = HorizontalScrollView(this).apply {
+        controlScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(controls)
         }
 
-        root.addView(domainText)
-        root.addView(controlScroller)
-        root.addView(markerText)
-        root.addView(debugTools)
-        root.addView(debugPanel)
-        root.addView(webView)
+        browserColumn.addView(domainText)
+        browserColumn.addView(controlScroller)
+        browserColumn.addView(markerText)
+        browserColumn.addView(debugTools)
+        browserColumn.addView(debugPanel)
+        browserColumn.addView(webView)
+        root.addView(browserColumn)
+
+        readerControl = smallButton("Shield") {
+            readerControlsExpanded = !readerControlsExpanded
+            syncBrowserChromeVisibility()
+        }.apply {
+            contentDescription = "Show or hide Site Shield reader controls"
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(dp(72), dp(44), Gravity.END or Gravity.BOTTOM).apply {
+                setMargins(dp(12), dp(12), dp(12), dp(16))
+            }
+        }
+        root.addView(readerControl)
         updateRuntimeMarkers()
         return root
+    }
+
+    private fun applyBrowserUiMode(pageType: PageType) {
+        val nextMode = browserUiModeFor(pageType)
+        if (browserUiMode != nextMode) {
+            browserUiMode = nextMode
+            readerControlsExpanded = false
+        }
+        syncBrowserChromeVisibility()
+    }
+
+    private fun syncBrowserChromeVisibility() {
+        if (!::readerControl.isInitialized) return
+        val showChrome = browserUiMode == BrowserUiMode.NORMAL || readerControlsExpanded
+        val chromeVisibility = if (showChrome) View.VISIBLE else View.GONE
+        domainText.visibility = chromeVisibility
+        controlScroller.visibility = chromeVisibility
+        markerText.visibility = chromeVisibility
+        debugTools.visibility = if (showChrome && settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        debugPanel.visibility = if (showChrome && settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        readerControl.visibility = if (browserUiMode == BrowserUiMode.READER) View.VISIBLE else View.GONE
+        readerControl.text = if (readerControlsExpanded) "Hide" else "Shield"
     }
 
     private fun smallButton(label: String, onClick: () -> Unit): Button =
@@ -356,6 +404,9 @@ class MainActivity : Activity() {
             profileButton.text = profile.displayName
         }
         updateHeader(webView.title)
+        applyBrowserUiMode(
+            blockerEngine.classifyPageType(profile, webView.url ?: profile.startUrl),
+        )
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.PROFILE,
@@ -405,7 +456,7 @@ class MainActivity : Activity() {
         val storageRan = recent.any {
             it.category == DebugEventCategory.STORAGE_CLEANUP || it.category == DebugEventCategory.COOKIE_CLEANUP
         }
-        markerText.text = "Profile=${activeProfile.id} PageType=$pageType StrictChapter=${pageType == PageType.CHAPTER_READER && policy.blockOffsiteMainFrameNavigations} " +
+        markerText.text = "Profile=${activeProfile.id} PageType=$pageType OffsiteStrict=${policy.blockOffsiteMainFrameNavigations} " +
             "OffsiteNavDenied=$navDenied ReaderCleanupRan=$cleanupRan StorageCleanupRan=$storageRan"
     }
 

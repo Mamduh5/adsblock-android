@@ -185,17 +185,18 @@ object MangakakalotProfile {
             ),
             requestRules = hostileRequestRules,
             domRules = baselineDomRules,
+            blockOffsiteMainFrameNavigations = true,
+            promptForOffsiteMainFrameNavigations = false,
         ),
         pagePolicies = mapOf(
             PageType.CHAPTER_READER to PagePolicy(
                 domRules = chapterDomRules,
-                blockOffsiteMainFrameNavigations = true,
-                promptForOffsiteMainFrameNavigations = false,
             ),
         ),
         suspiciousCookieKeyPatterns = suspiciousEvidenceKeys,
         suspiciousStorageKeyPatterns = suspiciousEvidenceKeys,
         protectedCookieKeyPatterns = protectedAccountKeys,
         protectedStorageKeyPatterns = protectedAccountKeys,
+        warnOnSuspiciousNavigation = false,
     )
 }

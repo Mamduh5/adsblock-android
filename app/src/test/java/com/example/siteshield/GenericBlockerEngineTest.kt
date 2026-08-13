@@ -93,32 +93,85 @@ class GenericBlockerEngineTest {
     }
 
     @Test
-    fun `chapter reader policy blocks offsite main frame navigation without changing detail policy`() {
+    fun `mangakakalot blocks offsite main frame navigation on every page type`() {
         val chapterUrl = "https://www.mangakakalot.gg/chapter/example/chapter-1"
         val detailUrl = "https://www.mangakakalot.gg/manga/example"
+        val homeUrl = "https://www.mangakakalot.gg/"
 
-        assertTrue(
-            engine.isSuspiciousNavigation(
-                profile,
-                "https://example.org/open",
-                currentPageUrl = chapterUrl,
-                isMainFrame = true,
-            ),
-        )
-        assertFalse(
-            engine.isSuspiciousNavigation(
-                profile,
-                "https://example.org/open",
-                currentPageUrl = detailUrl,
-                isMainFrame = true,
-            ),
-        )
+        listOf(chapterUrl, detailUrl, homeUrl).forEach { currentUrl ->
+            listOf("http://example.org/open", "https://example.org/open").forEach { targetUrl ->
+                assertEquals(
+                    BlockDecision.Block(BlockReason.OFFSITE_MAIN_FRAME),
+                    engine.navigationDecision(
+                        profile,
+                        targetUrl,
+                        currentPageUrl = currentUrl,
+                        isMainFrame = true,
+                    ),
+                )
+            }
+        }
         assertFalse(engine.policyForUrl(profile, chapterUrl).promptForOffsiteMainFrameNavigations)
-        assertTrue(engine.policyForUrl(profile, detailUrl).promptForOffsiteMainFrameNavigations)
+        assertFalse(engine.policyForUrl(profile, detailUrl).promptForOffsiteMainFrameNavigations)
     }
 
     @Test
-    fun `page type policy summary reports strict chapter policy`() {
+    fun `mangakakalot allows same site chapter detail and subdomain navigation`() {
+        val chapterUrl = "https://www.mangakakalot.gg/chapter/example/chapter-1"
+
+        listOf(
+            "https://www.mangakakalot.gg/chapter/example/chapter-2",
+            "https://www.mangakakalot.gg/manga/example",
+            "https://cdn.mangakakalot.gg/chapter/example/chapter-2",
+        ).forEach { targetUrl ->
+            assertEquals(
+                BlockDecision.Allow,
+                engine.navigationDecision(profile, targetUrl, chapterUrl, isMainFrame = true),
+            )
+        }
+    }
+
+    @Test
+    fun `mangakakalot hostile destination remains an explicit block`() {
+        val decision = engine.navigationDecision(
+            profile,
+            "https://oundhertobeconsist.org/floater",
+            "https://www.mangakakalot.gg/",
+            isMainFrame = true,
+        )
+
+        assertEquals(
+            BlockDecision.Block(BlockReason.REQUEST_RULE, "oundhertobeconsist-floater"),
+            decision,
+        )
+    }
+
+    @Test
+    fun `another profile can still prompt for offsite main frame navigation`() {
+        val promptProfile = SiteProfile(
+            id = "prompting-test-profile",
+            displayName = "Prompting test profile",
+            startUrl = "https://reader.example/",
+            allowedHosts = listOf(HostPattern.DomainSuffix("reader.example")),
+            baselinePolicy = PagePolicy(
+                blockOffsiteMainFrameNavigations = false,
+                promptForOffsiteMainFrameNavigations = true,
+            ),
+        )
+
+        assertEquals(
+            BlockDecision.PromptExternal("https://external.example/article"),
+            engine.navigationDecision(
+                promptProfile,
+                "https://external.example/article",
+                "https://reader.example/chapter/1",
+                isMainFrame = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `page type policy summary reports strict mangakakalot policy`() {
         val summary = engine.describePolicy(profile, PageType.CHAPTER_READER)
 
         assertTrue(summary.contains("pageType=CHAPTER_READER"))
