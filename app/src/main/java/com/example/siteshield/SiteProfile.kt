@@ -23,6 +23,8 @@ enum class PageType {
     HOME_LIST_SEARCH,
     DETAIL,
     CHAPTER_READER,
+    INTERACTIVE_MAP,
+    INTERACTIVE_TOOL,
     UNKNOWN,
 }
 
@@ -172,6 +174,11 @@ sealed class PathPattern {
 
         override fun matches(path: String?): Boolean =
             path.normalizedPath()?.contains(normalized) == true
+    }
+
+    data class RegularExpression(private val pattern: Regex) : PathPattern() {
+        override fun matches(path: String?): Boolean =
+            path.normalizedPath()?.matches(pattern) == true
     }
 }
 

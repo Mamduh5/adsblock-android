@@ -127,6 +127,42 @@ class ProfileOwnershipTest {
         )
     }
 
+    @Test
+    fun `main frame navigation switches between production profiles`() {
+        val productionEngine = GenericBlockerEngine()
+
+        assertEquals(
+            "palworld-gg",
+            productionEngine.profileForRequest(
+                "https://palworld.gg/map",
+                MangakakalotProfile.profile,
+                ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+            ).id,
+        )
+        assertEquals(
+            "mangakakalot",
+            productionEngine.profileForRequest(
+                "https://www.mangakakalot.gg/",
+                PalworldGgProfile.profile,
+                ProfileRequestContext.MAIN_FRAME_NAVIGATION,
+            ).id,
+        )
+    }
+
+    @Test
+    fun `palworld subresources retain palworld top level ownership`() {
+        val productionEngine = GenericBlockerEngine()
+
+        assertEquals(
+            "palworld-gg",
+            productionEngine.profileForRequest(
+                "https://s.nitropay.com/ads-1813.js",
+                PalworldGgProfile.profile,
+                ProfileRequestContext.SUBRESOURCE,
+            ).id,
+        )
+    }
+
     private fun profile(
         id: String,
         allowedHosts: List<HostPattern>,

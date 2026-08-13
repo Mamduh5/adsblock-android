@@ -27,6 +27,7 @@ object SiteProfileRegistry {
         defaultProfile = DefaultProfile.profile,
         supportedProfiles = listOf(
             MangakakalotProfile.profile,
+            PalworldGgProfile.profile,
         ),
     )
 
