@@ -20,7 +20,7 @@ class SiteShieldWebViewClient(
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
-    private val onPageTypeChanged: (PageType) -> Unit,
+    private val onTopLevelNavigationStarted: () -> Unit,
 ) : WebViewClient() {
     private val topLevelContext = TopLevelContextStore(
         TopLevelContext(
@@ -105,7 +105,7 @@ class SiteShieldWebViewClient(
         val updatedContext = updateTopLevelContext(url)
         val profile = updatedContext.profile
         val pageType = blockerEngine.classifyPageType(profile, updatedContext.url)
-        onPageTypeChanged(pageType)
+        onTopLevelNavigationStarted()
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
@@ -124,8 +124,6 @@ class SiteShieldWebViewClient(
 
     override fun onPageFinished(view: WebView, url: String?) {
         super.onPageFinished(view, url)
-        val updatedContext = updateTopLevelContext(url)
-        onPageTypeChanged(blockerEngine.classifyPageType(updatedContext.profile, updatedContext.url))
         if (settingsStore.blockerEnabled) {
             onPageLoaded(view)
         }

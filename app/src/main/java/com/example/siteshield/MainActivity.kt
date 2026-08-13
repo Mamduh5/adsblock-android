@@ -17,7 +17,6 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -36,12 +35,11 @@ class MainActivity : Activity() {
     private lateinit var debugTools: LinearLayout
     private lateinit var markerText: TextView
     private lateinit var filterButton: Button
-    private lateinit var controlScroller: HorizontalScrollView
-    private lateinit var readerControl: Button
+    private lateinit var shieldPanel: LinearLayout
+    private lateinit var shieldControl: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
     private var debugFilter: DebugEventCategory? = null
-    private var browserUiMode = BrowserUiMode.NORMAL
-    private var readerControlsExpanded = false
+    private var shieldPanelState = ShieldPanelState.COLLAPSED
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,7 +113,7 @@ class MainActivity : Activity() {
             onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
             onPageLoaded = ::injectDomCleanup,
-            onPageTypeChanged = ::applyBrowserUiMode,
+            onTopLevelNavigationStarted = ::collapseShieldPanel,
         )
 
         if (savedInstanceState == null) {
@@ -132,7 +130,9 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        if (webView.canGoBack()) {
+        if (shieldPanelState.consumesBack()) {
+            collapseShieldPanel()
+        } else if (webView.canGoBack()) {
             webView.goBack()
         } else {
             super.onBackPressed()
@@ -153,27 +153,12 @@ class MainActivity : Activity() {
             )
         }
 
-        val browserColumn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-
         domainText = TextView(this).apply {
-            text = activeProfile.displayName
+            text = "Site Shield - ${activeProfile.displayName}"
             textSize = 16f
             setTextColor(Color.rgb(17, 24, 39))
-            setPadding(dp(12), dp(8), dp(12), dp(4))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             maxLines = 2
-        }
-
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(8), dp(8))
         }
 
         val backButton = smallButton("Back") {
@@ -188,7 +173,7 @@ class MainActivity : Activity() {
             injectDomCleanup(webView)
         }
 
-        profileButton = smallButton(activeProfile.displayName) {
+        profileButton = smallButton("Profile: ${activeProfile.displayName}") {
             showProfilePicker()
         }
 
@@ -219,13 +204,9 @@ class MainActivity : Activity() {
             isChecked = settingsStore.debugEnabled
             setOnCheckedChangeListener { _, enabled ->
                 settingsStore.debugEnabled = enabled
-                syncBrowserChromeVisibility()
+                syncShieldPanelVisibility()
                 updateDebugLog()
             }
-        }
-
-        listOf(backButton, reloadButton, cleanupButton, profileButton, blockerSwitch, dataCleanButton, debugSwitch).forEach {
-            controls.addView(it)
         }
 
         markerText = TextView(this).apply {
@@ -276,60 +257,81 @@ class MainActivity : Activity() {
         }
         debugPanel.addView(logText)
 
-        webView.layoutParams = LinearLayout.LayoutParams(
+        webView.layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f,
+            ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        root.addView(webView)
 
-        controlScroller = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(controls)
-        }
-
-        browserColumn.addView(domainText)
-        browserColumn.addView(controlScroller)
-        browserColumn.addView(markerText)
-        browserColumn.addView(debugTools)
-        browserColumn.addView(debugPanel)
-        browserColumn.addView(webView)
-        root.addView(browserColumn)
-
-        readerControl = smallButton("Shield") {
-            readerControlsExpanded = !readerControlsExpanded
-            syncBrowserChromeVisibility()
-        }.apply {
-            contentDescription = "Show or hide Site Shield reader controls"
+        shieldPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(250, 250, 250))
+            setPadding(dp(8), dp(6), dp(8), dp(8))
+            elevation = dp(8).toFloat()
             visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP,
+            ).apply {
+                setMargins(dp(10), dp(10), dp(10), dp(10))
+            }
+        }.apply {
+            addView(domainText)
+            addView(controlRow(backButton, reloadButton))
+            addView(profileButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(controlRow(cleanupButton, dataCleanButton))
+            addView(controlRow(blockerSwitch, debugSwitch))
+            addView(markerText)
+            addView(debugTools)
+            addView(debugPanel)
+        }
+        root.addView(shieldPanel)
+
+        shieldControl = smallButton("Shield") {
+            shieldPanelState = shieldPanelState.toggled()
+            syncShieldPanelVisibility()
+        }.apply {
+            contentDescription = "Show or hide Site Shield controls"
             layoutParams = FrameLayout.LayoutParams(dp(72), dp(44), Gravity.END or Gravity.BOTTOM).apply {
                 setMargins(dp(12), dp(12), dp(12), dp(16))
             }
         }
-        root.addView(readerControl)
+        root.addView(shieldControl)
+        syncShieldPanelVisibility()
         updateRuntimeMarkers()
         return root
     }
 
-    private fun applyBrowserUiMode(pageType: PageType) {
-        val nextMode = browserUiModeFor(pageType)
-        if (browserUiMode != nextMode) {
-            browserUiMode = nextMode
-            readerControlsExpanded = false
+    private fun controlRow(vararg controls: View): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            controls.forEach { control ->
+                addView(
+                    control,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+            }
         }
-        syncBrowserChromeVisibility()
+
+    private fun collapseShieldPanel() {
+        shieldPanelState = shieldPanelState.afterTopLevelNavigation()
+        syncShieldPanelVisibility()
     }
 
-    private fun syncBrowserChromeVisibility() {
-        if (!::readerControl.isInitialized) return
-        val showChrome = browserUiMode == BrowserUiMode.NORMAL || readerControlsExpanded
-        val chromeVisibility = if (showChrome) View.VISIBLE else View.GONE
-        domainText.visibility = chromeVisibility
-        controlScroller.visibility = chromeVisibility
-        markerText.visibility = chromeVisibility
-        debugTools.visibility = if (showChrome && settingsStore.debugEnabled) View.VISIBLE else View.GONE
-        debugPanel.visibility = if (showChrome && settingsStore.debugEnabled) View.VISIBLE else View.GONE
-        readerControl.visibility = if (browserUiMode == BrowserUiMode.READER) View.VISIBLE else View.GONE
-        readerControl.text = if (readerControlsExpanded) "Hide" else "Shield"
+    private fun syncShieldPanelVisibility() {
+        if (!::shieldControl.isInitialized || !::shieldPanel.isInitialized) return
+        val expanded = shieldPanelState == ShieldPanelState.EXPANDED
+        shieldPanel.visibility = if (expanded) View.VISIBLE else View.GONE
+        markerText.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        debugTools.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        debugPanel.visibility = if (settingsStore.debugEnabled) View.VISIBLE else View.GONE
+        shieldControl.visibility = View.VISIBLE
+        shieldControl.text = if (expanded) "Hide" else "Shield"
     }
 
     private fun smallButton(label: String, onClick: () -> Unit): Button =
@@ -401,12 +403,10 @@ class MainActivity : Activity() {
         settingsStore.selectedProfileId = profile.id
         WebViewConfigurator.applyCookiePolicy(webView, profile)
         if (::profileButton.isInitialized) {
-            profileButton.text = profile.displayName
+            profileButton.text = "Profile: ${profile.displayName}"
         }
         updateHeader(webView.title)
-        applyBrowserUiMode(
-            blockerEngine.classifyPageType(profile, webView.url ?: profile.startUrl),
-        )
+        collapseShieldPanel()
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.PROFILE,
@@ -419,9 +419,7 @@ class MainActivity : Activity() {
 
     private fun updateHeader(title: String?) {
         val pageTitle = title?.takeIf { it.isNotBlank() } ?: activeProfile.startUrl.hostFromUrl().orEmpty()
-        val pageType = blockerEngine.classifyPageType(activeProfile, webView.url ?: activeProfile.startUrl)
-        val strictMarker = if (pageType == PageType.CHAPTER_READER) " [CHAPTER STRICT]" else ""
-        domainText.text = "${activeProfile.displayName}$strictMarker - $pageTitle"
+        domainText.text = "${activeProfile.displayName} - $pageTitle"
         updateRuntimeMarkers()
     }
 
