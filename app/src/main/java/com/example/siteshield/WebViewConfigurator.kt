@@ -18,7 +18,8 @@ object WebViewConfigurator {
             blockNetworkImage = profile.dataSaverPolicy.blockNetworkImages(dataSaverMode, PageType.UNKNOWN)
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             mediaPlaybackRequiresUserGesture = true
-            setSupportMultipleWindows(false)
+            // User-gesture new windows are redirected into the single main WebView.
+            setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
             allowFileAccess = false
             allowContentAccess = false

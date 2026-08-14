@@ -24,7 +24,7 @@ class SiteProfileRegistryTest {
     fun `unknown host uses default profile`() {
         val profile = SiteProfileRegistry.match("https://example.org/")
 
-        assertEquals("default", profile.id)
+        assertEquals("generic-web", profile.id)
     }
 
     @Test
@@ -66,7 +66,7 @@ class SiteProfileRegistryTest {
     @Test
     fun `selectable profiles include all production sites in order`() {
         assertEquals(
-            listOf("mangakakalot", "palworld-gg", "aquareader", "youtube", "facebook"),
+            listOf("generic-web", "mangakakalot", "palworld-gg", "aquareader", "youtube", "facebook"),
             SiteProfileRegistry.selectableProfiles().map { it.id },
         )
     }

@@ -5,7 +5,7 @@ class SiteProfileCatalog(
     val supportedProfiles: List<SiteProfile>,
 ) {
     fun byId(id: String?): SiteProfile =
-        supportedProfiles.firstOrNull { it.id == id } ?: defaultProfile
+        (listOf(defaultProfile) + supportedProfiles).firstOrNull { it.id == id } ?: defaultProfile
 
     fun match(urlOrHost: String?): SiteProfile {
         val host = urlOrHost.hostLikeValue()
@@ -14,7 +14,7 @@ class SiteProfileCatalog(
         } ?: defaultProfile
     }
 
-    fun selectableProfiles(): List<SiteProfile> = supportedProfiles
+    fun selectableProfiles(): List<SiteProfile> = listOf(defaultProfile) + supportedProfiles
 
     private fun String?.hostLikeValue(): String? {
         if (this.isNullOrBlank()) return null
@@ -43,6 +43,8 @@ object SiteProfileRegistry {
     fun byId(id: String?): SiteProfile = catalog.byId(id)
 
     fun match(urlOrHost: String?): SiteProfile = catalog.match(urlOrHost)
+
+    fun profileForExplicitNavigation(url: String?): SiteProfile = catalog.match(url)
 
     fun selectableProfiles(): List<SiteProfile> = catalog.selectableProfiles()
 }

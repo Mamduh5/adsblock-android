@@ -17,10 +17,14 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.inputmethod.EditorInfo
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -35,6 +39,8 @@ class MainActivity : Activity() {
     private lateinit var dataUsageTracker: DataUsageTracker
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
+    private lateinit var webViewClient: SiteShieldWebViewClient
+    private lateinit var browseHome: View
     private lateinit var domainText: TextView
     private lateinit var profileButton: Button
     private lateinit var logText: TextView
@@ -47,6 +53,7 @@ class MainActivity : Activity() {
     private lateinit var shieldControl: Button
     private lateinit var dataSaverButton: Button
     private lateinit var dataUsageText: TextView
+    private lateinit var searchProviderButton: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
     private var debugFilter: DebugEventCategory? = null
     private var shieldUiState = ShieldUiState()
@@ -113,21 +120,35 @@ class MainActivity : Activity() {
                 isUserGesture: Boolean,
                 resultMsg: Message?,
             ): Boolean {
-                if (settingsStore.blockerEnabled) {
+                if (!isUserGesture || resultMsg == null) {
                     recordEvent(
                         DebugEvent(
                             category = DebugEventCategory.NAV_BLOCK,
                             message = "[${activeProfile.displayName}] Blocked new-window request",
-                            detail = "WebChromeClient.onCreateWindow",
+                            detail = "WebChromeClient.onCreateWindow userGesture=$isUserGesture",
                         ),
                     )
                     return false
                 }
-                return super.onCreateWindow(view, isDialog, isUserGesture, resultMsg)
+                val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+                val popupView = WebView(this@MainActivity)
+                popupView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        popup: WebView,
+                        request: WebResourceRequest,
+                    ): Boolean = openPopupInMainView(popup, request.url.toString())
+
+                    @Suppress("DEPRECATION")
+                    override fun shouldOverrideUrlLoading(popup: WebView, url: String): Boolean =
+                        openPopupInMainView(popup, url)
+                }
+                transport.webView = popupView
+                resultMsg.sendToTarget()
+                return true
             }
         }
 
-        webView.webViewClient = SiteShieldWebViewClient(
+        webViewClient = SiteShieldWebViewClient(
             context = this,
             settingsStore = settingsStore,
             blockerEngine = blockerEngine,
@@ -139,9 +160,14 @@ class MainActivity : Activity() {
             onPageUsageCheckpoint = ::updateDataUsageReadout,
             onTopLevelNavigationStarted = ::onTopLevelNavigationStarted,
         )
+        webView.webViewClient = webViewClient
 
         if (savedInstanceState == null) {
-            webView.loadUrl(activeProfile.startUrl)
+            if (activeProfile.id == GenericWebProfile.profile.id) {
+                showBrowseHome()
+            } else {
+                navigateExplicitUrl(activeProfile.startUrl)
+            }
         } else {
             webView.restoreState(savedInstanceState)
         }
@@ -158,7 +184,7 @@ class MainActivity : Activity() {
             shieldUiState = shieldUiState.afterBack()
             syncShieldUi()
         } else if (webView.canGoBack()) {
-            webView.goBack()
+            navigateHistory(-1)
         } else {
             super.onBackPressed()
         }
@@ -195,11 +221,19 @@ class MainActivity : Activity() {
         }
 
         val backButton = smallButton("Back") {
-            if (webView.canGoBack()) webView.goBack()
+            navigateHistory(-1)
+        }
+
+        val forwardButton = smallButton("Forward") {
+            navigateHistory(1)
         }
 
         val reloadButton = smallButton("Reload") {
             webView.reload()
+        }
+
+        val browseButton = largeButton("Browse / Search") {
+            showOmnibox()
         }
 
         val cleanupButton = smallButton("Cleanup") {
@@ -258,6 +292,13 @@ class MainActivity : Activity() {
             maxLines = 2
         }
         updateDataUsageReadout()
+
+        searchProviderButton = largeButton(searchProviderButtonLabel()) {
+            val provider = settingsStore.searchProvider.next()
+            settingsStore.searchProvider = provider
+            searchProviderButton.text = searchProviderButtonLabel()
+            Toast.makeText(this, "Search provider: ${provider.displayName}", Toast.LENGTH_SHORT).show()
+        }
 
         val debugSwitch = Switch(this).apply {
             text = "Debug updates"
@@ -325,6 +366,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         contentLayer.addView(webView)
+        browseHome = buildBrowseHome().apply { visibility = View.GONE }
+        contentLayer.addView(browseHome)
 
         val openDebugButton = largeButton("Open Debug Logs") {
             shieldUiState = shieldUiState.openDebug()
@@ -354,7 +397,8 @@ class MainActivity : Activity() {
             }
         }.apply {
             addView(domainText)
-            addView(controlRow(backButton, reloadButton))
+            addView(controlRow(backButton, forwardButton, reloadButton))
+            addView(browseButton)
             addView(profileButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -362,6 +406,7 @@ class MainActivity : Activity() {
             addView(controlRow(cleanupButton, dataCleanButton))
             addView(blockerSwitch)
             addView(dataSaverButton)
+            addView(searchProviderButton)
             addView(dataUsageText)
             addView(debugSwitch)
             addView(openDebugButton)
@@ -465,8 +510,152 @@ class MainActivity : Activity() {
     }
 
     private fun onTopLevelNavigationStarted(profile: SiteProfile, url: String?) {
+        if (::browseHome.isInitialized) browseHome.visibility = View.GONE
         applyDataSaverPolicy(profile, url)
         collapseShieldPanel()
+    }
+
+    private fun searchProviderButtonLabel(): String =
+        "Search: ${settingsStore.searchProvider.displayName}"
+
+    private fun showOmnibox() {
+        val input = EditText(this).apply {
+            hint = "Search or enter website"
+            setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_GO
+            val currentUrl = webView.url
+            if (!currentUrl.isNullOrBlank() && currentUrl.startsWith("http")) {
+                setText(currentUrl)
+                selectAll()
+            }
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Browse")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Go", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (navigateFromOmnibox(input.text.toString())) dialog.dismiss()
+            }
+            input.setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    if (navigateFromOmnibox(input.text.toString())) dialog.dismiss()
+                    true
+                } else {
+                    false
+                }
+            }
+            input.requestFocus()
+            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
+        dialog.show()
+    }
+
+    private fun navigateFromOmnibox(rawInput: String): Boolean {
+        val target = OmniboxInputParser.parse(rawInput) ?: return false
+        return when (target) {
+            is NavigationTarget.Url -> {
+                navigateExplicitUrl(target.url)
+                true
+            }
+            is NavigationTarget.SearchQuery -> {
+                navigateExplicitUrl(settingsStore.searchProvider.buildSearchUrl(target.query))
+                true
+            }
+            is NavigationTarget.Invalid -> {
+                Toast.makeText(this, target.reason, Toast.LENGTH_SHORT).show()
+                false
+            }
+        }
+    }
+
+    private fun navigateExplicitUrl(url: String) {
+        if (::browseHome.isInitialized) browseHome.visibility = View.GONE
+        webViewClient.prepareExplicitNavigation(url)
+        webView.loadUrl(url)
+    }
+
+    private fun openPopupInMainView(popupView: WebView, url: String): Boolean {
+        popupView.destroy()
+        val target = OmniboxInputParser.parse(url)
+        if (target is NavigationTarget.Url) {
+            navigateExplicitUrl(target.url)
+        } else {
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.NAV_BLOCK,
+                    message = "Blocked unsupported new-window destination",
+                ),
+            )
+        }
+        return true
+    }
+
+    private fun navigateHistory(offset: Int) {
+        val history = webView.copyBackForwardList()
+        val targetIndex = history.currentIndex + offset
+        if (targetIndex !in 0 until history.size) return
+        webViewClient.prepareHistoryNavigation(history.getItemAtIndex(targetIndex).url)
+        webView.goBackOrForward(offset)
+    }
+
+    private fun showBrowseHome() {
+        webViewClient.prepareExplicitNavigation(GenericWebProfile.profile.startUrl)
+        setActiveProfile(GenericWebProfile.profile)
+        browseHome.visibility = View.VISIBLE
+        collapseShieldPanel()
+    }
+
+    private fun buildBrowseHome(): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(28), dp(54), dp(28), dp(28))
+            setBackgroundColor(Color.WHITE)
+        }
+        content.addView(TextView(this).apply {
+            text = "Site Shield"
+            textSize = 28f
+            setTextColor(Color.rgb(17, 24, 39))
+            gravity = Gravity.CENTER
+        })
+        val input = EditText(this).apply {
+            hint = "Search or enter website"
+            setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_GO
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    navigateFromOmnibox(text.toString())
+                    true
+                } else false
+            }
+        }
+        content.addView(input, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(28) })
+        content.addView(largeButton("Go / Search") { navigateFromOmnibox(input.text.toString()) })
+        content.addView(TextView(this).apply {
+            text = "Optimized Sites"
+            textSize = 18f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, dp(28), 0, dp(8))
+        })
+        SiteProfileRegistry.supportedProfiles.forEach { profile ->
+            content.addView(largeButton(profile.displayName) { navigateExplicitUrl(profile.startUrl) }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        return ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            addView(content)
+        }
     }
 
     private fun syncShieldUi() {
@@ -589,7 +778,11 @@ class MainActivity : Activity() {
                         detail = "id=${selected.id}",
                     ),
                 )
-                webView.loadUrl(selected.startUrl)
+                if (selected.id == GenericWebProfile.profile.id) {
+                    showBrowseHome()
+                } else {
+                    navigateExplicitUrl(selected.startUrl)
+                }
             }
             .show()
     }
@@ -698,7 +891,12 @@ class MainActivity : Activity() {
                 insets.getInsets(WindowInsets.Type.displayCutout()).top,
             )
         } else {
-            topSafeInsetPx(insets.systemWindowInsetTop, insets.displayCutout?.safeInsetTop ?: 0)
+            val cutoutTop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                insets.displayCutout?.safeInsetTop ?: 0
+            } else {
+                0
+            }
+            topSafeInsetPx(insets.systemWindowInsetTop, cutoutTop)
         }
 
     @Suppress("DEPRECATION")

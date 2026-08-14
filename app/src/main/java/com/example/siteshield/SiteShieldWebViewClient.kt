@@ -24,6 +24,7 @@ class SiteShieldWebViewClient(
     private val onPageUsageCheckpoint: () -> Unit,
     private val onTopLevelNavigationStarted: (SiteProfile, String?) -> Unit,
 ) : WebViewClient() {
+    private val profileHistory = TopLevelProfileHistory()
     private val topLevelContext = TopLevelContextStore(
         TopLevelContext(
             url = null,
@@ -31,16 +32,33 @@ class SiteShieldWebViewClient(
         ),
     )
 
+    /**
+     * Replaces the authoritative top-level context before an app-owned loadUrl call.
+     * There is no reusable intent flag: the destination profile is resolved and installed atomically.
+     */
+    fun prepareExplicitNavigation(url: String): SiteProfile {
+        val profile = blockerEngine.profileForExplicitNavigation(url)
+        replaceTopLevelContext(url, profile)
+        return profile
+    }
+
+    /** Restores the profile recorded for exactly the WebView history entry being traversed. */
+    fun prepareHistoryNavigation(url: String): SiteProfile {
+        val profile = profileHistory.profileFor(url)
+            ?: blockerEngine.profileForExplicitNavigation(url)
+        replaceTopLevelContext(url, profile)
+        return profile
+    }
+
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
         val url = uri.toString()
         val activeContext = topLevelContext.snapshot()
-        val requestContext = if (request.isForMainFrame) {
-            ProfileRequestContext.MAIN_FRAME_NAVIGATION
-        } else {
-            ProfileRequestContext.SUBFRAME_NAVIGATION
-        }
-        val profile = blockerEngine.profileForRequest(url, activeContext.profile, requestContext)
+        val profile = blockerEngine.profileForNavigationPolicy(
+            url = url,
+            activeTopLevelProfile = activeContext.profile,
+            isMainFrame = request.isForMainFrame,
+        )
 
         if (!settingsStore.blockerEnabled) return false
 
@@ -188,9 +206,14 @@ class SiteShieldWebViewClient(
         val previousContext = topLevelContext.snapshot()
         val updatedUrl = url ?: previousContext.url
         val updatedProfile = blockerEngine.profileForTopLevelUrl(updatedUrl, previousContext.profile)
-        val updatedContext = TopLevelContext(updatedUrl, updatedProfile)
+        return replaceTopLevelContext(updatedUrl, updatedProfile)
+    }
+
+    private fun replaceTopLevelContext(url: String?, profile: SiteProfile): TopLevelContext {
+        val updatedContext = TopLevelContext(url, profile)
         topLevelContext.update(updatedContext)
-        onProfileMatched(updatedProfile)
+        profileHistory.remember(url, profile)
+        onProfileMatched(profile)
         return updatedContext
     }
 

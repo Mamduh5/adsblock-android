@@ -14,9 +14,13 @@ class SettingsStore(context: Context) {
         set(value) = preferences.edit().putBoolean(KEY_DEBUG_ENABLED, value).apply()
 
     var selectedProfileId: String
-        get() = preferences.getString(KEY_SELECTED_PROFILE_ID, MangakakalotProfile.profile.id)
-            ?: MangakakalotProfile.profile.id
+        get() = preferences.getString(KEY_SELECTED_PROFILE_ID, GenericWebProfile.profile.id)
+            ?: GenericWebProfile.profile.id
         set(value) = preferences.edit().putString(KEY_SELECTED_PROFILE_ID, value).apply()
+
+    var searchProvider: SearchProvider
+        get() = SearchProvider.fromStoredValue(preferences.getString(KEY_SEARCH_PROVIDER, null))
+        set(value) = preferences.edit().putString(KEY_SEARCH_PROVIDER, value.name).apply()
 
     var dataSaverMode: DataSaverMode
         get() {
@@ -40,5 +44,6 @@ class SettingsStore(context: Context) {
         private const val KEY_DEBUG_ENABLED = "debug_enabled"
         private const val KEY_SELECTED_PROFILE_ID = "selected_profile_id"
         private const val KEY_DATA_SAVER_MODE = "data_saver_mode"
+        private const val KEY_SEARCH_PROVIDER = "search_provider"
     }
 }

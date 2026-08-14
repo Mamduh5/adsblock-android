@@ -32,14 +32,29 @@ sealed interface BlockDecision {
 class GenericBlockerEngine(
     private val profileCatalog: SiteProfileCatalog = SiteProfileRegistry.catalog,
 ) {
+    fun profileForExplicitNavigation(url: String?): SiteProfile = profileCatalog.match(url)
+
     fun profileForTopLevelUrl(url: String?, currentProfile: SiteProfile? = null): SiteProfile {
         val matched = profileCatalog.match(url)
         return when {
-            matched.id != profileCatalog.defaultProfile.id -> matched
-            currentProfile != null -> currentProfile
-            else -> matched
+            currentProfile == null -> matched
+            currentProfile.id == profileCatalog.defaultProfile.id -> matched
+            matched.id == currentProfile.id -> matched
+            else -> currentProfile
         }
     }
+
+    fun profileForNavigationPolicy(
+        url: String?,
+        activeTopLevelProfile: SiteProfile,
+        isMainFrame: Boolean,
+    ): SiteProfile =
+        when {
+            !isMainFrame -> activeTopLevelProfile
+            activeTopLevelProfile.id == profileCatalog.defaultProfile.id ->
+                profileForExplicitNavigation(url)
+            else -> activeTopLevelProfile
+        }
 
     fun profileForRequest(
         url: String?,
@@ -48,7 +63,7 @@ class GenericBlockerEngine(
     ): SiteProfile =
         when (context) {
             ProfileRequestContext.MAIN_FRAME_NAVIGATION ->
-                profileForTopLevelUrl(url, activeTopLevelProfile)
+                profileForExplicitNavigation(url)
             ProfileRequestContext.SUBFRAME_NAVIGATION -> activeTopLevelProfile
             ProfileRequestContext.SUBRESOURCE -> activeTopLevelProfile
         }

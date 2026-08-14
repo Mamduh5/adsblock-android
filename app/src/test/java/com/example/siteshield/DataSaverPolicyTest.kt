@@ -7,6 +7,7 @@ import org.junit.Test
 
 class DataSaverPolicyTest {
     private val profiles = listOf(
+        GenericWebProfile.profile,
         MangakakalotProfile.profile,
         PalworldGgProfile.profile,
         AquaReaderProfile.profile,

@@ -1,13 +1,14 @@
 # Site Shield Mobile
 
-Native Kotlin Android app for dedicated, profile-based protected WebView browsing. The current experimental profile opens `https://www.mangakakalot.gg/`, while the blocker architecture is built so more site profiles can be added later without scattering site-specific logic through the app.
+Native Kotlin Android app for protected single-WebView browsing. Fresh installs open the local Browse home; known sites automatically use optimized profiles while other HTTP(S) destinations use the conservative Generic Web profile.
 
 ## What v1 Includes
 
 - Multi-site `SiteProfile` model with site id, display name, start URL, allowed hosts, page-type classifiers, baseline policy, page-type overrides, cookie/storage key patterns, and per-site flags.
 - Reusable `PagePolicy` and `RequestRule` models for host, path, query-token, URL-token, first-party loader, navigation, resource, and DOM cleanup decisions.
-- `MangakakalotProfile` as the first supported site profile.
-- `DefaultProfile` fallback for unknown sites.
+- Optimized profiles for Mangakakalot, Palworld.gg, AquaReader, YouTube, and Facebook.
+- `GenericWebProfile` fallback for ordinary cross-domain browsing.
+- Native Browse Home and temporary omnibox with Google, DuckDuckGo, and Bing search.
 - `SiteProfileRegistry` for profile lookup and URL/host matching.
 - `GenericBlockerEngine` for reusable host classification, navigation decisions, resource blocking, and suspicious data-key checks.
 - WebView-based in-app browser with external-link confirmation.
@@ -36,7 +37,7 @@ Native Kotlin Android app for dedicated, profile-based protected WebView browsin
 3. Use an Android emulator or device with internet access.
 4. Run the `app` configuration.
 
-The app defaults to `https://www.mangakakalot.gg/`.
+Fresh installs default to the local Browse Home. A previously selected profile remains the startup profile.
 
 ## Architecture
 
@@ -44,6 +45,8 @@ The app defaults to `https://www.mangakakalot.gg/`.
 - `CommonRules.kt`: conservative reusable host, URL, data-key, and DOM heuristics.
 - `MangakakalotProfile.kt`: first experimental profile.
 - `DefaultProfile.kt`: generic fallback.
+- `BrowseNavigation.kt`: pure omnibox parsing and encoded search-provider URLs.
+- `GenericWebProfile.kt`: conservative cross-domain browsing policy.
 - `SiteProfileRegistry.kt`: profile list and URL/host matching.
 - `GenericBlockerEngine.kt`: profile and page-type-driven blocker decisions.
 - `SiteShieldWebViewClient.kt`: WebView navigation/resource enforcement.
@@ -60,13 +63,21 @@ The app defaults to `https://www.mangakakalot.gg/`.
 
 Most new-site work should stay in the new profile file.
 
+## Navigation ownership
+
+- Omnibox, Browse Home shortcuts, and user-gesture new-window links call an explicit-navigation entry point that resolves and atomically installs exactly one destination profile before loading.
+- Generic top-level navigation can move between arbitrary HTTP(S) sites and activates an optimized profile when the destination is registered.
+- A specialized profile keeps ownership while evaluating page-driven redirects and offsite links. An unknown callback never silently turns a protected-site redirect into Generic browsing.
+- Subframes and subresources always use the immutable active top-level context. `shouldInterceptRequest()` reads request data plus the atomic snapshot and never calls WebView APIs.
+- Back/Forward prepares the exact session-recorded profile for the destination history entry. The map is memory-only and stores no persistent browser history.
+
 ## Target Site Test Checklist
 
 - Load Mangakakalot and confirm normal browsing/reading still works.
 - Leave the page open long enough to trigger delayed ads or overlays.
 - Enable debug mode and verify logs include active profile, blocked navigation, blocked resources, DOM cleanup, and data cleanup.
 - Confirm suspicious redirects are blocked before leaving the page when detectable.
-- Confirm popups/new-window attempts are blocked with the blocker enabled.
+- Confirm unsolicited popups are blocked; a user-gesture HTTP(S) new-window link opens in the same Site Shield WebView.
 - Confirm obvious ad iframes, fake close buttons, overlay traps, and deceptive continue/download/skip elements are removed or neutralized.
 - Confirm the blocker toggle disables blocking for comparison.
 - Run `Clean` and verify suspicious site data cleanup does not remove normal session state.
