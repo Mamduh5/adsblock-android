@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -37,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var settingsStore: SettingsStore
     private lateinit var dataSaverModeStore: DataSaverModeStore
     private lateinit var dataUsageTracker: DataUsageTracker
+    private lateinit var downloadCoordinator: DownloadCoordinator
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var webViewClient: SiteShieldWebViewClient
@@ -55,6 +57,7 @@ class MainActivity : Activity() {
     private lateinit var dataUsageText: TextView
     private lateinit var searchProviderButton: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
+    private val downloadIntentTracker = DownloadIntentTracker(clockMs = SystemClock::elapsedRealtime)
     private var debugFilter: DebugEventCategory? = null
     private var shieldUiState = ShieldUiState()
 
@@ -65,6 +68,7 @@ class MainActivity : Activity() {
         activeProfile = SiteProfileRegistry.byId(settingsStore.selectedProfileId)
         dataSaverModeStore = DataSaverModeStore(settingsStore.dataSaverMode)
         dataUsageTracker = DataUsageTracker(AndroidNetworkCounterProvider, activeProfile.id)
+        downloadCoordinator = DownloadCoordinator(this, onEvent = ::recordEvent)
 
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -161,6 +165,20 @@ class MainActivity : Activity() {
             onTopLevelNavigationStarted = ::onTopLevelNavigationStarted,
         )
         webView.webViewClient = webViewClient
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+            val request = DownloadRequestInfo.fromWebViewCallback(
+                url = url,
+                userAgent = userAgent,
+                contentDisposition = contentDisposition,
+                mimeType = mimeType,
+                contentLength = contentLength,
+            )
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                handleDownloadRequest(request)
+            } else {
+                runOnUiThread { handleDownloadRequest(request) }
+            }
+        }
 
         if (savedInstanceState == null) {
             if (activeProfile.id == GenericWebProfile.profile.id) {
@@ -192,6 +210,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         dataUsageTracker.flush()
+        downloadIntentTracker.clear()
+        downloadCoordinator.close()
         webView.destroy()
         super.onDestroy()
     }
@@ -234,6 +254,11 @@ class MainActivity : Activity() {
 
         val browseButton = largeButton("Browse / Search") {
             showOmnibox()
+        }
+
+        val downloadsButton = largeButton("Downloads") {
+            collapseShieldPanel()
+            showDownloadsDialog()
         }
 
         val cleanupButton = smallButton("Cleanup") {
@@ -398,7 +423,7 @@ class MainActivity : Activity() {
         }.apply {
             addView(domainText)
             addView(controlRow(backButton, forwardButton, reloadButton))
-            addView(browseButton)
+            addView(controlRow(browseButton, downloadsButton))
             addView(profileButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -727,9 +752,199 @@ class MainActivity : Activity() {
             }
         })
         webView.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                downloadIntentTracker.recordGesture()
+            }
             detector.onTouchEvent(event)
             false
         }
+    }
+
+    private fun handleDownloadRequest(request: DownloadRequestInfo?) {
+        if (request == null) {
+            recordEvent(DebugEvent(DebugEventCategory.DOWNLOAD, "download-blocked", "reason=missing-url"))
+            Toast.makeText(this, "This download is not supported", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val policy = DownloadPolicy.decide(request.url)
+        if (policy is DownloadPolicyDecision.Block) {
+            downloadIntentTracker.clear()
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DOWNLOAD,
+                    message = "download-blocked",
+                    detail = "host=${policy.host ?: "unknown"}, profile=${activeProfile.id}, reason=${policy.reason}",
+                ),
+            )
+            val message = if (policy.reason == DownloadBlockReason.UNSUPPORTED_INLINE_DATA) {
+                "This type of download is not supported yet"
+            } else {
+                "Download blocked for safety"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
+        }
+        val blockerDecision = if (settingsStore.blockerEnabled) {
+            blockerEngine.resourceDecision(activeProfile, request.url, webView.url)
+        } else {
+            BlockDecision.Allow
+        }
+        if (blockerDecision is BlockDecision.Block) {
+            downloadIntentTracker.clear()
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DOWNLOAD,
+                    message = "download-blocked",
+                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, profile=${activeProfile.id}, " +
+                        "reason=blocker-${blockerDecision.reason}, ruleId=${blockerDecision.ruleId ?: "none"}",
+                ),
+            )
+            Toast.makeText(this, "Download blocked by Site Shield", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!downloadIntentTracker.consumeIfRecent()) {
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.DOWNLOAD,
+                    message = "download-blocked",
+                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, profile=${activeProfile.id}, reason=no-recent-user-gesture",
+                ),
+            )
+            Toast.makeText(this, "Blocked automatic download", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val prepared = DownloadPreparation.prepare(request)
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.DOWNLOAD,
+                message = "download-request",
+                detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, mime=${prepared.mimeType}, " +
+                    "filename=${prepared.filename}, profile=${activeProfile.id}",
+            ),
+        )
+        val profileId = activeProfile.id
+        val size = request.contentLength?.let(::formatDataBytes) ?: "Unknown"
+        val warning = if (prepared.dangerousFileType) {
+            "\n\nWarning: This file may be executable or installable. Site Shield will not run or install it."
+        } else {
+            ""
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Download file?")
+            .setMessage(
+                "Filename: ${prepared.filename}\n" +
+                    "Type: ${prepared.mimeType}\n" +
+                    "Size: $size$warning",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Download") { _, _ ->
+                when (val result = downloadCoordinator.enqueue(prepared, profileId)) {
+                    is DownloadEnqueueResult.Enqueued ->
+                        Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
+                    is DownloadEnqueueResult.Rejected ->
+                        Toast.makeText(this, "Download blocked for safety", Toast.LENGTH_LONG).show()
+                    is DownloadEnqueueResult.Failed ->
+                        Toast.makeText(this, "Could not start download", Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
+    }
+
+    private fun showDownloadsDialog() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        val status = TextView(this).apply {
+            text = "Loading downloads…"
+            textSize = 15f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, dp(10), 0, dp(10))
+        }
+        content.addView(status)
+        val scroll = ScrollView(this).apply { addView(content) }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Downloads")
+            .setView(scroll)
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Refresh", null)
+            .create()
+        fun refresh() {
+            status.text = "Loading downloads…"
+            downloadCoordinator.queryDownloads { items ->
+                if (!dialog.isShowing) return@queryDownloads
+                renderDownloadItems(content, status, items, ::refresh)
+            }
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener { refresh() }
+            refresh()
+        }
+        dialog.show()
+    }
+
+    private fun renderDownloadItems(
+        container: LinearLayout,
+        statusView: TextView,
+        items: List<DownloadItem>,
+        refresh: () -> Unit,
+    ) {
+        container.removeAllViews()
+        if (items.isEmpty()) {
+            statusView.text = "No Site Shield downloads yet"
+            container.addView(statusView)
+            return
+        }
+        items.forEach { item ->
+            val details = TextView(this).apply {
+                textSize = 15f
+                setTextColor(Color.rgb(31, 41, 55))
+                setPadding(0, dp(10), dp(8), dp(6))
+                text = buildString {
+                    append(item.record.filename)
+                    append("\n")
+                    append(downloadStatusLabel(item))
+                    item.totalBytes?.let { append(" · ${formatDataBytes(it)}") }
+                    append("\nProfile: ${item.record.profileId}")
+                }
+            }
+            container.addView(details)
+            when (item.state) {
+                DownloadState.COMPLETED -> container.addView(largeButton("Open") {
+                    downloadCoordinator.open(item.record.downloadManagerId, item.record.mimeType) { result ->
+                        when (result) {
+                            DownloadOpenResult.Opened -> Unit
+                            DownloadOpenResult.NoHandler -> Toast.makeText(this, "No app can open this file", Toast.LENGTH_LONG).show()
+                            DownloadOpenResult.NotCompleted -> Toast.makeText(this, "Download is not complete", Toast.LENGTH_SHORT).show()
+                            DownloadOpenResult.Missing -> Toast.makeText(this, "Downloaded file is unavailable", Toast.LENGTH_SHORT).show()
+                            is DownloadOpenResult.Failed -> Toast.makeText(this, "Could not open download", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                })
+                DownloadState.QUEUED, DownloadState.DOWNLOADING, DownloadState.PAUSED ->
+                    container.addView(largeButton("Cancel") {
+                        downloadCoordinator.cancel(item.record.downloadManagerId) { removed ->
+                            Toast.makeText(
+                                this,
+                                if (removed) "Download canceled" else "Could not cancel download",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            refresh()
+                        }
+                    })
+                else -> Unit
+            }
+        }
+    }
+
+    private fun downloadStatusLabel(item: DownloadItem): String = when (item.state) {
+        DownloadState.QUEUED -> "Queued"
+        DownloadState.DOWNLOADING -> item.progressPercent?.let { "Downloading · $it%" } ?: "Downloading…"
+        DownloadState.PAUSED -> "Paused"
+        DownloadState.COMPLETED -> "Completed"
+        DownloadState.FAILED -> "Failed"
+        DownloadState.UNKNOWN -> "Unknown"
     }
 
     private fun injectDomCleanup(view: WebView) {

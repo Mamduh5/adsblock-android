@@ -15,6 +15,7 @@ enum class DebugEventCategory {
     POLICY_DECISION,
     DATA_SAVER,
     DATA_SAVER_BLOCK,
+    DOWNLOAD,
 }
 
 data class DebugEvent(

@@ -9,6 +9,7 @@ Native Kotlin Android app for protected single-WebView browsing. Fresh installs 
 - Optimized profiles for Mangakakalot, Palworld.gg, AquaReader, YouTube, and Facebook.
 - `GenericWebProfile` fallback for ordinary cross-domain browsing.
 - Native Browse Home and temporary omnibox with Google, DuckDuckGo, and Bing search.
+- User-confirmed Android-native downloads with drive-by protection, safe filenames, session-owned status metadata, and explicit Open/Cancel controls.
 - `SiteProfileRegistry` for profile lookup and URL/host matching.
 - `GenericBlockerEngine` for reusable host classification, navigation decisions, resource blocking, and suspicious data-key checks.
 - WebView-based in-app browser with external-link confirmation.
@@ -50,6 +51,8 @@ Fresh installs default to the local Browse Home. A previously selected profile r
 - `SiteProfileRegistry.kt`: profile list and URL/host matching.
 - `GenericBlockerEngine.kt`: profile and page-type-driven blocker decisions.
 - `SiteShieldWebViewClient.kt`: WebView navigation/resource enforcement.
+- `DownloadModels.kt`: pure request normalization, gesture intent, URL policy, filename/MIME, status, and progress models.
+- `DownloadCoordinator.kt`: Android `DownloadManager`, privacy-minimal metadata persistence, status queries, cancellation, and content-URI opening.
 - `SiteDataCleaner.kt`: profile-driven suspicious cookie/storage cleanup.
 - `dom_cleanup.js`: local DOM cleanup logic fed by active profile rules.
 
@@ -70,6 +73,15 @@ Most new-site work should stay in the new profile file.
 - A specialized profile keeps ownership while evaluating page-driven redirects and offsite links. An unknown callback never silently turns a protected-site redirect into Generic browsing.
 - Subframes and subresources always use the immutable active top-level context. `shouldInterceptRequest()` reads request data plus the atomic snapshot and never calls WebView APIs.
 - Back/Forward prepares the exact session-recorded profile for the destination history entry. The map is memory-only and stores no persistent browser history.
+
+## Downloads v1
+
+- `WebView.setDownloadListener` normalizes callback metadata but cannot enqueue by itself. A recent WebView tap creates a 1.5-second, atomic, single-use intent token; callbacks without one are blocked as automatic downloads.
+- HTTPS downloads pass a separate conservative hostile-host policy and always require native confirmation. Cleartext HTTP, custom schemes, `blob:`, `data:`, and `filesystem:` are rejected.
+- Android `DownloadManager` owns transfer, public Downloads storage, redirects, background continuation, duplicate handling, and completion notifications. Site Shield forwards the callback User-Agent and current WebView cookie header only into the system request; neither is logged or persisted.
+- Persisted app metadata is limited to DownloadManager ID, sanitized filename, MIME type, creation time, and originating profile ID. Full URLs, query strings, cookies, and referrers are not retained.
+- Opening is always an explicit user action using DownloadManager's content URI, `ACTION_VIEW`, and read permission delegation. Site Shield never auto-opens, executes, or installs a file.
+- Data Saver does not truncate or block confirmed system downloads. Android DownloadManager normally transfers under a system UID, so its bytes are not added to Site Shield's WebView UID meter.
 
 ## Target Site Test Checklist
 
