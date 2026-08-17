@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var dataSaverModeStore: DataSaverModeStore
     private lateinit var dataUsageTracker: DataUsageTracker
     private lateinit var downloadCoordinator: DownloadCoordinator
+    private lateinit var adaptiveShieldController: AdaptiveShieldController
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var webViewClient: SiteShieldWebViewClient
@@ -54,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var debugOverlay: FrameLayout
     private lateinit var shieldControl: Button
     private lateinit var dataSaverButton: Button
+    private lateinit var adaptiveModeButton: Button
     private lateinit var dataUsageText: TextView
     private lateinit var searchProviderButton: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
@@ -69,6 +71,12 @@ class MainActivity : Activity() {
         dataSaverModeStore = DataSaverModeStore(settingsStore.dataSaverMode)
         dataUsageTracker = DataUsageTracker(AndroidNetworkCounterProvider, activeProfile.id)
         downloadCoordinator = DownloadCoordinator(this, onEvent = ::recordEvent)
+        adaptiveShieldController = AdaptiveShieldController(
+            persistence = SharedPreferencesAdaptiveStatePersistence(this),
+            initialMode = settingsStore.adaptiveShieldMode,
+            profileById = SiteProfileRegistry::byId,
+            onEvent = ::recordEvent,
+        )
 
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -90,6 +98,13 @@ class MainActivity : Activity() {
                 category = DebugEventCategory.PROFILE,
                 message = "Active profile: ${activeProfile.displayName}",
                 detail = "id=${activeProfile.id}",
+            ),
+        )
+        recordEvent(
+            DebugEvent(
+                category = DebugEventCategory.ADAPTIVE_OBSERVE,
+                message = "Adaptive Shield mode=${adaptiveShieldController.mode().name}",
+                detail = "localOnly=true, remoteLearning=false",
             ),
         )
         recordEvent(
@@ -165,10 +180,14 @@ class MainActivity : Activity() {
             settingsStore = settingsStore,
             blockerEngine = blockerEngine,
             dataSaverModeStore = dataSaverModeStore,
+            adaptiveShieldController = adaptiveShieldController,
             initialProfile = activeProfile,
             onProfileMatched = ::setActiveProfile,
             onEvent = ::recordEvent,
-            onPageLoaded = ::injectDomCleanup,
+            onPageLoaded = { view ->
+                injectDomCleanup(view)
+                inspectAdaptivePageHealth(view)
+            },
             onPageUsageCheckpoint = ::updateDataUsageReadout,
             onTopLevelNavigationStarted = ::onTopLevelNavigationStarted,
         )
@@ -220,6 +239,7 @@ class MainActivity : Activity() {
         dataUsageTracker.flush()
         downloadIntentTracker.clear()
         downloadCoordinator.close()
+        adaptiveShieldController.close()
         webView.destroy()
         super.onDestroy()
     }
@@ -316,6 +336,24 @@ class MainActivity : Activity() {
             if (updatedMode == DataSaverMode.MAX) {
                 Toast.makeText(this, "MAX may reduce page images", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        adaptiveModeButton = largeButton(adaptiveModeButtonLabel()) {
+            val updatedMode = adaptiveShieldController.mode().next()
+            settingsStore.adaptiveShieldMode = updatedMode
+            adaptiveShieldController.updateMode(updatedMode)
+            adaptiveModeButton.text = adaptiveModeButtonLabel()
+            recordEvent(
+                DebugEvent(
+                    category = DebugEventCategory.ADAPTIVE_OBSERVE,
+                    message = "Adaptive Shield mode=${updatedMode.name}",
+                    detail = "blockingActive=${settingsStore.blockerEnabled && updatedMode == AdaptiveShieldMode.AUTO_SAFE}",
+                ),
+            )
+        }
+        val adaptiveStatusButton = largeButton("Adaptive Shield") {
+            collapseShieldPanel()
+            showAdaptiveShieldDialog()
         }
 
         dataUsageText = TextView(this).apply {
@@ -439,6 +477,7 @@ class MainActivity : Activity() {
             addView(controlRow(cleanupButton, dataCleanButton))
             addView(blockerSwitch)
             addView(dataSaverButton)
+            addView(controlRow(adaptiveModeButton, adaptiveStatusButton))
             addView(searchProviderButton)
             addView(dataUsageText)
             addView(debugSwitch)
@@ -716,6 +755,131 @@ class MainActivity : Activity() {
 
     private fun dataSaverButtonLabel(): String =
         "Data Saver: ${dataSaverModeStore.snapshot().displayName}"
+
+    private fun adaptiveModeButtonLabel(): String =
+        "Adaptive: ${adaptiveShieldController.mode().displayName}"
+
+    private fun showAdaptiveShieldDialog() {
+        val profile = activeProfile
+        val summary = adaptiveShieldController.summary(profile.id)
+        val records = adaptiveShieldController.records(profile.id)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        content.addView(TextView(this).apply {
+            text = "${profile.displayName}\n" +
+                "Observed: ${summary.observed}  Candidates: ${summary.candidates}\n" +
+                "Learned active: ${summary.learnedActive}  Dormant: ${summary.dormant}  " +
+                "Rejected: ${summary.rejected}"
+            textSize = 15f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, dp(8), 0, dp(10))
+        })
+        if (records.isEmpty()) {
+            content.addView(TextView(this).apply {
+                text = "No local adaptive evidence for this profile yet."
+                textSize = 14f
+                setTextColor(Color.rgb(75, 85, 99))
+                setPadding(0, dp(8), 0, dp(8))
+            })
+        } else {
+            records.forEach { record ->
+                content.addView(largeButton(adaptiveRuleLabel(record)) {
+                    showAdaptiveRuleActions(profile, record)
+                })
+            }
+        }
+        val scroll = ScrollView(this).apply { addView(content) }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Adaptive Shield")
+            .setView(scroll)
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Forget Learned Rules", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Forget adaptive data?")
+                    .setMessage("Remove candidates, learned rules, and observations for ${profile.displayName}? Cookies and site data are not affected.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Forget") { _, _ ->
+                        adaptiveShieldController.forget(profile.id)
+                        dialog.dismiss()
+                        Toast.makeText(this, "Adaptive data forgotten", Toast.LENGTH_SHORT).show()
+                    }
+                    .show()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showAdaptiveRuleActions(profile: SiteProfile, record: AdaptiveRecord) {
+        val actions = buildList {
+            if (record.state == AdaptiveCandidateState.LEARNED || record.state == AdaptiveCandidateState.DORMANT) {
+                add("Disable learned rule")
+            }
+            add("Forget rule")
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(record.host)
+            .setMessage(
+                "Type: ${record.type}\nState: ${record.state}\nSeen: ${record.occurrenceCount}\n" +
+                    "Confidence: ${record.confidence}\nPath: ${record.path ?: "host only"}",
+            )
+            .setItems(actions.toTypedArray()) { _, index ->
+                when (actions[index]) {
+                    "Disable learned rule" -> adaptiveShieldController.disable(profile.id, record.id)
+                    else -> adaptiveShieldController.forget(profile.id, record.id)
+                }
+                Toast.makeText(this, "Adaptive rule updated", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun adaptiveRuleLabel(record: AdaptiveRecord): String {
+        val kind = when (record.type) {
+            AdaptiveCandidateType.OFFSITE_REDIRECT_HOST -> "Offsite redirect"
+            AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> "Third-party request"
+            AdaptiveCandidateType.FIRST_PARTY_LOADER -> "Loader"
+            AdaptiveCandidateType.DOM_STRUCTURE -> "DOM candidate (review only)"
+        }
+        return "${record.state}: ${record.host}\n$kind · Seen ${record.occurrenceCount} · Confidence ${record.confidence}"
+    }
+
+    private fun inspectAdaptivePageHealth(view: WebView) {
+        if (adaptiveShieldController.mode() != AdaptiveShieldMode.AUTO_SAFE) return
+        val profile = activeProfile
+        val pageUrl = view.url
+        val pageType = blockerEngine.classifyPageType(profile, pageUrl)
+        if (profile.id != MangakakalotProfile.profile.id || pageType != PageType.CHAPTER_READER) return
+        val script = """
+            (function() {
+              var reader = !!document.querySelector('.container-chapter-reader');
+              var images = document.querySelectorAll('.container-chapter-reader img').length;
+              var navigation = !!document.querySelector('.navi-change-chapter, .panel-navigation, .chapter-select, select');
+              return (reader ? '1' : '0') + ',' + images + ',' + (navigation ? '1' : '0');
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(script) { raw ->
+            val parts = decodeJavascriptString(raw).split(',')
+            if (parts.size != 3) return@evaluateJavascript
+            val readerPresent = parts[0] == "1"
+            val imageCount = parts[1].toIntOrNull()?.coerceAtLeast(0) ?: return@evaluateJavascript
+            val navigationPresent = parts[2] == "1"
+            adaptiveShieldController.reportPageHealth(
+                AdaptivePageHealth(
+                    profileId = profile.id,
+                    pageType = pageType,
+                    healthy = readerPresent && imageCount > 0 && navigationPresent,
+                    readerContainerPresent = readerPresent,
+                    chapterImageCount = imageCount,
+                    chapterNavigationPresent = navigationPresent,
+                ),
+            )
+        }
+    }
 
     private fun applyDataSaverPolicy(profile: SiteProfile, url: String?) {
         val pageType = blockerEngine.classifyPageType(profile, url ?: profile.startUrl)
@@ -1081,6 +1245,7 @@ class MainActivity : Activity() {
             it.category == DebugEventCategory.STORAGE_CLEANUP || it.category == DebugEventCategory.COOKIE_CLEANUP
         }
         markerText.text = "Profile=${activeProfile.id} PageType=$pageType DataSaver=${dataSaverModeStore.snapshot().name} " +
+            "Adaptive=${adaptiveShieldController.mode().name} " +
             "OffsiteStrict=${policy.blockOffsiteMainFrameNavigations} " +
             "OffsiteNavDenied=$navDenied ReaderCleanupRan=$cleanupRan StorageCleanupRan=$storageRan"
     }

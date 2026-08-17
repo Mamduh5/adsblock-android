@@ -16,6 +16,7 @@ object GenericWebProfile {
             blockExplicitPrefetch = true,
             blockNetworkImagesInMax = true,
         ),
+        adaptivePolicy = AdaptivePolicy(enabled = false),
         suspiciousCookieKeyPatterns = listOf(suspiciousKeyRegex()),
         suspiciousStorageKeyPatterns = listOf(suspiciousKeyRegex()),
         protectedCookieKeyPatterns = listOf(protectedAccountKeyRegex()),

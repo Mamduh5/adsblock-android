@@ -107,6 +107,10 @@ object PalworldGgProfile {
                 PageType.INTERACTIVE_TOOL,
             ),
         ),
+        adaptivePolicy = AdaptivePolicy(
+            enabled = true,
+            protectedHosts = listOf(siteHost),
+        ),
         allowThirdPartyCookies = false,
     )
 }

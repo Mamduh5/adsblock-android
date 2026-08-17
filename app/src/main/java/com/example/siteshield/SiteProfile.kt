@@ -12,6 +12,7 @@ data class SiteProfile(
     val baselinePolicy: PagePolicy = PagePolicy(),
     val pagePolicies: Map<PageType, PagePolicy> = emptyMap(),
     val dataSaverPolicy: DataSaverPolicy = DataSaverPolicy(),
+    val adaptivePolicy: AdaptivePolicy = AdaptivePolicy(),
     val suspiciousCookieKeyPatterns: List<Regex> = emptyList(),
     val suspiciousStorageKeyPatterns: List<Regex> = emptyList(),
     val protectedCookieKeyPatterns: List<Regex> = emptyList(),

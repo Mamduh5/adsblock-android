@@ -111,6 +111,13 @@ object FacebookProfile {
         dataSaverPolicy = DataSaverPolicy(
             blockNetworkImagesInMax = true,
         ),
+        adaptivePolicy = AdaptivePolicy(
+            enabled = true,
+            protectedHosts = listOf(
+                HostPattern.DomainSuffix("facebook.com"),
+                HostPattern.DomainSuffix("fbcdn.net"),
+            ),
+        ),
         protectedCookieKeyPatterns = listOf(sessionKeyPattern),
         protectedStorageKeyPatterns = listOf(sessionKeyPattern),
         allowThirdPartyCookies = false,

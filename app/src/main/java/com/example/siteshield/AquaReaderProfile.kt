@@ -159,6 +159,12 @@ object AquaReaderProfile {
             blockNetworkImagesInMax = true,
             preserveMaxImagesForPageTypes = setOf(PageType.CHAPTER_READER),
         ),
+        adaptivePolicy = AdaptivePolicy(
+            enabled = true,
+            observeOffsiteNavigations = true,
+            observeThirdPartyRequests = false,
+            autoPromoteTypes = setOf(AdaptiveCandidateType.OFFSITE_REDIRECT_HOST),
+        ),
         allowThirdPartyCookies = false,
         warnOnSuspiciousNavigation = false,
     )

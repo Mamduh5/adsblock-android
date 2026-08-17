@@ -39,11 +39,25 @@ class SettingsStore(context: Context) {
         }
         set(value) = preferences.edit().putString(KEY_DATA_SAVER_MODE, value.name).apply()
 
+    var adaptiveShieldMode: AdaptiveShieldMode
+        get() {
+            if (preferences.contains(KEY_ADAPTIVE_SHIELD_MODE)) {
+                return AdaptiveShieldMode.fromStoredValue(
+                    preferences.getString(KEY_ADAPTIVE_SHIELD_MODE, null),
+                )
+            }
+            val initial = AdaptiveShieldMode.initialMode()
+            preferences.edit().putString(KEY_ADAPTIVE_SHIELD_MODE, initial.name).apply()
+            return initial
+        }
+        set(value) = preferences.edit().putString(KEY_ADAPTIVE_SHIELD_MODE, value.name).apply()
+
     companion object {
         private const val KEY_BLOCKER_ENABLED = "blocker_enabled"
         private const val KEY_DEBUG_ENABLED = "debug_enabled"
         private const val KEY_SELECTED_PROFILE_ID = "selected_profile_id"
         private const val KEY_DATA_SAVER_MODE = "data_saver_mode"
         private const val KEY_SEARCH_PROVIDER = "search_provider"
+        private const val KEY_ADAPTIVE_SHIELD_MODE = "adaptive_shield_mode"
     }
 }

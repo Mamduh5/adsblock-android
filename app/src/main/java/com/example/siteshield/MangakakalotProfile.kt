@@ -197,6 +197,21 @@ object MangakakalotProfile {
             blockNetworkImagesInMax = true,
             preserveMaxImagesForPageTypes = setOf(PageType.CHAPTER_READER),
         ),
+        adaptivePolicy = AdaptivePolicy(
+            enabled = true,
+            observeOffsiteNavigations = true,
+            observeThirdPartyRequests = true,
+            autoPromoteTypes = setOf(
+                AdaptiveCandidateType.OFFSITE_REDIRECT_HOST,
+                AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
+                AdaptiveCandidateType.FIRST_PARTY_LOADER,
+            ),
+            protectedHosts = listOf(
+                HostPattern.DomainSuffix("storage.waitst.com"),
+                HostPattern.DomainSuffix("2xstorage.com"),
+            ),
+            firstPartyLoaderPathPrefixes = listOf("/js/ads/"),
+        ),
         suspiciousCookieKeyPatterns = suspiciousEvidenceKeys,
         suspiciousStorageKeyPatterns = suspiciousEvidenceKeys,
         protectedCookieKeyPatterns = protectedAccountKeys,

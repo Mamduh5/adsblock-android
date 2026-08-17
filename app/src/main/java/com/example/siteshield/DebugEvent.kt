@@ -17,6 +17,12 @@ enum class DebugEventCategory {
     DATA_SAVER,
     DATA_SAVER_BLOCK,
     DOWNLOAD,
+    ADAPTIVE_OBSERVE,
+    ADAPTIVE_CANDIDATE,
+    ADAPTIVE_PROMOTE,
+    ADAPTIVE_BLOCK,
+    ADAPTIVE_ROLLBACK,
+    ADAPTIVE_EXPIRE,
 }
 
 data class DebugEvent(

@@ -107,6 +107,14 @@ object YouTubeProfile {
             blockNetworkImagesInMax = true,
             preserveMaxImagesForPageTypes = setOf(PageType.VIDEO_WATCH),
         ),
+        adaptivePolicy = AdaptivePolicy(
+            enabled = true,
+            protectedHosts = listOf(
+                HostPattern.DomainSuffix("googlevideo.com"),
+                HostPattern.DomainSuffix("ytimg.com"),
+                HostPattern.DomainSuffix("youtube.com"),
+            ),
+        ),
         protectedCookieKeyPatterns = listOf(protectedAccountKeyRegex()),
         protectedStorageKeyPatterns = listOf(protectedAccountKeyRegex()),
         allowThirdPartyCookies = false,

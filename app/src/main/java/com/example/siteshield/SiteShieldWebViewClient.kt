@@ -17,6 +17,7 @@ class SiteShieldWebViewClient(
     private val settingsStore: SettingsStore,
     private val blockerEngine: GenericBlockerEngine,
     private val dataSaverModeStore: DataSaverModeStore,
+    private val adaptiveShieldController: AdaptiveShieldController,
     initialProfile: SiteProfile,
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
@@ -77,6 +78,13 @@ class SiteShieldWebViewClient(
 
         return when (decision) {
             is BlockDecision.Block -> {
+                adaptiveShieldController.observeNavigation(
+                    profile = sourceContext.profile,
+                    sourceUrl = sourceContext.url,
+                    targetUrl = targetUrl,
+                    popup = true,
+                    blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
+                )
                 onEvent(
                     DebugEvent(
                         category = DebugEventCategory.POPUP_BLOCK,
@@ -99,6 +107,23 @@ class SiteShieldWebViewClient(
                 false
             }
             BlockDecision.Allow -> {
+                if (!settingsStore.blockerEnabled) {
+                    val sourcePolicyDecision = blockerEngine.navigationDecision(
+                        profile = sourceContext.profile,
+                        url = targetUrl,
+                        currentPageUrl = sourceContext.url,
+                        isMainFrame = true,
+                    )
+                    if (sourcePolicyDecision is BlockDecision.Block) {
+                        adaptiveShieldController.observeNavigation(
+                            profile = sourceContext.profile,
+                            sourceUrl = sourceContext.url,
+                            targetUrl = targetUrl,
+                            popup = true,
+                            blockedBySourcePolicy = false,
+                        )
+                    }
+                }
                 onEvent(
                     DebugEvent(
                         category = DebugEventCategory.POLICY_DECISION,
@@ -121,17 +146,39 @@ class SiteShieldWebViewClient(
             isMainFrame = request.isForMainFrame,
         )
 
-        if (!settingsStore.blockerEnabled) return false
-
         val currentPageUrl = activeContext.url
-        when (val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)) {
+        val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)
+        if (!settingsStore.blockerEnabled) {
+            if (request.isForMainFrame && decision is BlockDecision.Block) {
+                adaptiveShieldController.observeNavigation(
+                    profile = profile,
+                    sourceUrl = currentPageUrl,
+                    targetUrl = url,
+                    popup = false,
+                    blockedBySourcePolicy = false,
+                )
+            }
+            return false
+        }
+
+        when (decision) {
             is BlockDecision.Block -> {
+                if (request.isForMainFrame) {
+                    adaptiveShieldController.observeNavigation(
+                        profile = profile,
+                        sourceUrl = currentPageUrl,
+                        targetUrl = url,
+                        popup = false,
+                        blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
+                    )
+                }
                 val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
                 onEvent(
                     DebugEvent(
                         category = DebugEventCategory.NAV_BLOCK,
                         message = "[${profile.displayName}] Blocked main-frame=${request.isForMainFrame} navigation to ${uri.host ?: uri}",
-                        detail = "pageType=$pageType, reason=${decision.reason}, ruleId=${decision.ruleId ?: "none"}, url=$url",
+                        detail = "pageType=$pageType, reason=${decision.reason}, " +
+                            "ruleId=${decision.ruleId ?: "none"}, targetScheme=${uri.scheme}, targetHost=${uri.host}",
                     ),
                 )
                 if (profile.warnOnSuspiciousNavigation) {
@@ -154,9 +201,10 @@ class SiteShieldWebViewClient(
         if (request.isForMainFrame) return null
 
         val uri = request.url
+        val requestUrl = uri.toString()
         val activeContext = topLevelContext.snapshot()
         val profile = blockerEngine.profileForRequest(
-            uri.toString(),
+            requestUrl,
             activeContext.profile,
             ProfileRequestContext.SUBRESOURCE,
         )
@@ -181,16 +229,49 @@ class SiteShieldWebViewClient(
             return emptyResponse()
         }
 
-        if (!settingsStore.blockerEnabled) return null
-        val decision = blockerEngine.resourceDecision(profile, uri.toString(), activeContext.url)
-        if (decision !is BlockDecision.Block) return null
+        val resourceKind = adaptiveResourceKind(requestUrl, request.requestHeaders.orEmpty())
+        val blockerEnabled = settingsStore.blockerEnabled
+        val decision = if (blockerEnabled) {
+            blockerEngine.resourceDecision(profile, requestUrl, activeContext.url)
+        } else {
+            BlockDecision.Allow
+        }
+        adaptiveShieldController.observeRequest(
+            profile = profile,
+            pageUrl = activeContext.url,
+            requestUrl = requestUrl,
+            blockedByStaticRule = decision is BlockDecision.Block,
+            resourceKind = resourceKind,
+        )
+        if (decision is BlockDecision.Block) {
+            val pageType = blockerEngine.classifyPageType(profile, activeContext.url)
+            onEvent(
+                DebugEvent(
+                    category = DebugEventCategory.RESOURCE_BLOCK,
+                    message = "[${profile.displayName}] Blocked subresource from ${uri.host ?: uri}",
+                    detail = "pageType=$pageType, reason=${decision.reason}, " +
+                        "ruleId=${decision.ruleId ?: "none"}, targetScheme=${uri.scheme}, targetHost=${uri.host}",
+                ),
+            )
+            return emptyResponse()
+        }
+        val adaptiveDecision = adaptiveShieldController.decideRequest(
+            profile = profile,
+            pageUrl = activeContext.url,
+            requestUrl = requestUrl,
+            resourceKind = resourceKind,
+            blockerEnabled = blockerEnabled,
+        )
+        if (adaptiveDecision !is AdaptiveDecision.Block) return null
 
         val pageType = blockerEngine.classifyPageType(profile, activeContext.url)
         onEvent(
             DebugEvent(
-                category = DebugEventCategory.RESOURCE_BLOCK,
-                message = "[${profile.displayName}] Blocked subresource from ${uri.host ?: uri}",
-                detail = "pageType=$pageType, reason=${decision.reason}, ruleId=${decision.ruleId ?: "none"}, url=${uri}",
+                category = DebugEventCategory.ADAPTIVE_BLOCK,
+                message = "[${profile.displayName}] Adaptive rule blocked ${uri.host ?: "unknown host"}",
+                detail = "pageType=$pageType, reason=ADAPTIVE_RULE, ruleId=${adaptiveDecision.ruleId}, " +
+                    "confidence=${adaptiveDecision.confidence}, type=${adaptiveDecision.type}, " +
+                    "targetScheme=${uri.scheme}, targetHost=${uri.host}",
             ),
         )
         return emptyResponse()
