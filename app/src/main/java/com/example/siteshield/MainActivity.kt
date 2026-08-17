@@ -124,12 +124,15 @@ class MainActivity : Activity() {
                 isUserGesture: Boolean,
                 resultMsg: Message?,
             ): Boolean {
+                val sourceContext = webViewClient.topLevelContextSnapshot()
                 if (!isUserGesture || resultMsg == null) {
                     recordEvent(
                         DebugEvent(
-                            category = DebugEventCategory.NAV_BLOCK,
-                            message = "[${activeProfile.displayName}] Blocked new-window request",
-                            detail = "WebChromeClient.onCreateWindow userGesture=$isUserGesture",
+                            category = DebugEventCategory.POPUP_BLOCK,
+                            message = "[${sourceContext.profile.displayName}] Blocked new-window request",
+                            detail = "sourceProfile=${sourceContext.profile.id}, " +
+                                "sourcePageType=${blockerEngine.classifyPageType(sourceContext.profile, sourceContext.url)}, " +
+                                "hasGesture=$isUserGesture, onCreateWindow=true, actionView=false, loadUrl=false",
                         ),
                     )
                     return false
@@ -140,11 +143,16 @@ class MainActivity : Activity() {
                     override fun shouldOverrideUrlLoading(
                         popup: WebView,
                         request: WebResourceRequest,
-                    ): Boolean = openPopupInMainView(popup, request.url.toString())
+                    ): Boolean = openPopupInMainView(
+                        popup,
+                        request.url.toString(),
+                        sourceContext,
+                        isUserGesture,
+                    )
 
                     @Suppress("DEPRECATION")
                     override fun shouldOverrideUrlLoading(popup: WebView, url: String): Boolean =
-                        openPopupInMainView(popup, url)
+                        openPopupInMainView(popup, url, sourceContext, isUserGesture)
                 }
                 transport.webView = popupView
                 resultMsg.sendToTarget()
@@ -602,16 +610,26 @@ class MainActivity : Activity() {
         webView.loadUrl(url)
     }
 
-    private fun openPopupInMainView(popupView: WebView, url: String): Boolean {
+    private fun openPopupInMainView(
+        popupView: WebView,
+        url: String,
+        sourceContext: TopLevelContext,
+        hasUserGesture: Boolean,
+    ): Boolean {
         popupView.destroy()
         val target = OmniboxInputParser.parse(url)
-        if (target is NavigationTarget.Url) {
+        if (
+            target is NavigationTarget.Url &&
+            webViewClient.allowPopupNavigation(sourceContext, target.url, hasUserGesture)
+        ) {
             navigateExplicitUrl(target.url)
-        } else {
+        } else if (target !is NavigationTarget.Url) {
             recordEvent(
                 DebugEvent(
-                    category = DebugEventCategory.NAV_BLOCK,
+                    category = DebugEventCategory.POPUP_BLOCK,
                     message = "Blocked unsupported new-window destination",
+                    detail = "sourceProfile=${sourceContext.profile.id}, hasGesture=$hasUserGesture, " +
+                        "onCreateWindow=true, actionView=false, loadUrl=false",
                 ),
             )
         }

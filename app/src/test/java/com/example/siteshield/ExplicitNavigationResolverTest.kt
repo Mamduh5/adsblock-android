@@ -63,4 +63,38 @@ class ExplicitNavigationResolverTest {
             ),
         )
     }
+
+    @Test
+    fun `mangakakalot main frame redirects retain source policy while generic browsing stays open`() {
+        val sourceUrl = "https://www.mangakakalot.gg/chapter/example/chapter-1"
+        listOf(
+            "https://outside.example/landing",
+            "https://youtube.com/watch?v=video",
+            "https://facebook.com/example-page",
+        ).forEach { targetUrl ->
+            val policyProfile = engine.profileForNavigationPolicy(
+                targetUrl,
+                MangakakalotProfile.profile,
+                isMainFrame = true,
+            )
+
+            assertEquals("mangakakalot", policyProfile.id)
+            assertEquals(
+                BlockDecision.Block(BlockReason.OFFSITE_MAIN_FRAME),
+                engine.navigationDecision(policyProfile, targetUrl, sourceUrl),
+            )
+        }
+
+        val genericTarget = "https://outside.example/article"
+        val genericPolicy = engine.profileForNavigationPolicy(
+            genericTarget,
+            GenericWebProfile.profile,
+            isMainFrame = true,
+        )
+        assertEquals("generic-web", genericPolicy.id)
+        assertEquals(
+            BlockDecision.Allow,
+            engine.navigationDecision(genericPolicy, genericTarget, GenericWebProfile.profile.startUrl),
+        )
+    }
 }

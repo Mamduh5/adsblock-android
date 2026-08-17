@@ -8,6 +8,7 @@ enum class DebugEventCategory {
     PROFILE,
     PAGE_TYPE,
     NAV_BLOCK,
+    POPUP_BLOCK,
     RESOURCE_BLOCK,
     DOM_CLEANUP,
     STORAGE_CLEANUP,

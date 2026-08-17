@@ -16,6 +16,7 @@ enum class BlockReason {
     SUSPICIOUS_HOST,
     SUSPICIOUS_URL,
     OFFSITE_MAIN_FRAME,
+    POPUP_WITHOUT_USER_GESTURE,
 }
 
 sealed interface BlockDecision {
@@ -32,6 +33,26 @@ sealed interface BlockDecision {
 class GenericBlockerEngine(
     private val profileCatalog: SiteProfileCatalog = SiteProfileRegistry.catalog,
 ) {
+    fun popupNavigationDecision(
+        sourceProfile: SiteProfile,
+        targetUrl: String,
+        sourcePageUrl: String?,
+        hasUserGesture: Boolean,
+        blockerEnabled: Boolean,
+    ): BlockDecision {
+        if (!hasUserGesture) {
+            return BlockDecision.Block(BlockReason.POPUP_WITHOUT_USER_GESTURE)
+        }
+        if (!blockerEnabled) return BlockDecision.Allow
+
+        return navigationDecision(
+            profile = sourceProfile,
+            url = targetUrl,
+            currentPageUrl = sourcePageUrl,
+            isMainFrame = true,
+        )
+    }
+
     fun profileForExplicitNavigation(url: String?): SiteProfile = profileCatalog.match(url)
 
     fun profileForTopLevelUrl(url: String?, currentProfile: SiteProfile? = null): SiteProfile {

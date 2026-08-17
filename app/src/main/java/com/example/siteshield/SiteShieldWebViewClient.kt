@@ -50,6 +50,67 @@ class SiteShieldWebViewClient(
         return profile
     }
 
+    /** Captures popup ownership before the transient new-window WebView resolves its destination. */
+    fun topLevelContextSnapshot(): TopLevelContext = topLevelContext.snapshot()
+
+    /**
+     * Applies the source page's policy before a popup target can be treated as explicit browsing.
+     * Returns true only when the caller may load the target in the main WebView.
+     */
+    fun allowPopupNavigation(
+        sourceContext: TopLevelContext,
+        targetUrl: String,
+        hasUserGesture: Boolean,
+    ): Boolean {
+        val target = targetUrl.toUriOrNull()
+        val sourcePageType = blockerEngine.classifyPageType(sourceContext.profile, sourceContext.url)
+        val decision = blockerEngine.popupNavigationDecision(
+            sourceProfile = sourceContext.profile,
+            targetUrl = targetUrl,
+            sourcePageUrl = sourceContext.url,
+            hasUserGesture = hasUserGesture,
+            blockerEnabled = settingsStore.blockerEnabled,
+        )
+        val diagnostic = "sourceProfile=${sourceContext.profile.id}, sourcePageType=$sourcePageType, " +
+            "targetScheme=${target?.scheme ?: "invalid"}, targetHost=${target?.host ?: "invalid"}, " +
+            "hasGesture=$hasUserGesture, onCreateWindow=true, actionView=false"
+
+        return when (decision) {
+            is BlockDecision.Block -> {
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.POPUP_BLOCK,
+                        message = "[${sourceContext.profile.displayName}] Blocked new-window navigation",
+                        detail = "$diagnostic, decision=Block, reason=${decision.reason}, " +
+                            "ruleId=${decision.ruleId ?: "none"}, loadUrl=false",
+                    ),
+                )
+                false
+            }
+            is BlockDecision.PromptExternal -> {
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.POLICY_DECISION,
+                        message = "[${sourceContext.profile.displayName}] Prompted for new-window navigation",
+                        detail = "$diagnostic, decision=PromptExternal, loadUrl=false",
+                    ),
+                )
+                promptExternalOpen(Uri.parse(targetUrl))
+                false
+            }
+            BlockDecision.Allow -> {
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.POLICY_DECISION,
+                        message = "[${sourceContext.profile.displayName}] Allowed new-window navigation",
+                        detail = "$diagnostic, decision=Allow, loadUrl=true",
+                    ),
+                )
+                true
+            }
+        }
+    }
+
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
         val url = uri.toString()
