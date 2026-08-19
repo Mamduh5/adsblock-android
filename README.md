@@ -1,6 +1,6 @@
 # Site Shield Mobile
 
-Native Kotlin Android app for protected single-WebView browsing. Fresh installs open the local Browse home; known sites automatically use optimized profiles while other HTTP(S) destinations use the conservative Generic Web profile.
+Native Kotlin Android app for protected tabbed WebView browsing. Fresh installs open the local Browse home; known sites automatically use optimized profiles while other HTTP(S) destinations use the conservative Generic Web profile.
 
 ## What v1 Includes
 
@@ -9,6 +9,8 @@ Native Kotlin Android app for protected single-WebView browsing. Fresh installs 
 - Optimized profiles for Mangakakalot, Palworld.gg, AquaReader, YouTube, and Facebook.
 - `GenericWebProfile` fallback for ordinary cross-domain browsing.
 - Native Browse Home and temporary omnibox with Google, DuckDuckGo, and Bing search.
+- Six logical tabs with stable IDs, a three-live-WebView LRU budget, per-tab blocker/history/gesture state, and a lightweight native Tabs panel.
+- Versioned local session persistence for tab order, selected tab, safe HTTPS URL, resolved profile, title, last-use time, and best-effort scroll position. Only the selected restored tab is recreated at cold launch.
 - User-confirmed Android-native downloads with drive-by protection, safe filenames, session-owned status metadata, and explicit Open/Cancel controls.
 - `SiteProfileRegistry` for profile lookup and URL/host matching.
 - `GenericBlockerEngine` for reusable host classification, navigation decisions, resource blocking, and suspicious data-key checks.
@@ -19,7 +21,7 @@ Native Kotlin Android app for protected single-WebView browsing. Fresh installs 
 - Manual suspicious site data cleanup for cookie, localStorage, and sessionStorage keys matching the active profile.
 - Local-only blocker/debug/profile settings. No telemetry, analytics SDKs, remote rule loading, VPN, AccessibilityService, or JavaScript bridge.
 - Local Data Saver modes: OFF, BALANCED, and MAX. BALANCED blocks only requests explicitly marked as prefetch and retains gesture-required media playback; MAX may additionally suppress network images according to each profile's policy.
-- A session data meter based on Android per-UID RX/TX counters, including profile-active interval attribution. It reports actual app-UID traffic used, never estimated bytes saved.
+- A session data meter based on Android per-UID RX/TX counters. It reports actual app-UID traffic used, never estimated bytes saved; exact per-tab attribution is unavailable when several WebViews exist.
 
 ## Data Saver semantics
 
@@ -28,7 +30,7 @@ Native Kotlin Android app for protected single-WebView browsing. Fresh installs 
 - BALANCED preserves network images and selected media playback. Supported-site primary resources are not classified by filename or host as disposable media.
 - MAX uses WebView's native network-image setting only where the active profile/page policy permits it. Manga chapter pages, Palworld map/tools, and YouTube watch pages protect their primary images.
 - Changing mode does not reload the page. New and pending requests follow the updated WebView setting, and leaving MAX immediately restores normal network-image loading.
-- Session usage comes from cumulative `TrafficStats` counters for Site Shield's UID. Per-profile numbers attribute counter deltas to the profile active during that interval; they are not per-request measurements.
+- Session usage comes from cumulative `TrafficStats` counters for Site Shield's UID. The UI reports app-wide totals because Android's UID counters cannot distinguish concurrent tab traffic.
 - Usage remains on-device. Data Saver adds no VPN, proxy, DNS filtering, telemetry, cloud service, or Thinpipe integration.
 
 ## Run In Android Studio
@@ -38,7 +40,7 @@ Native Kotlin Android app for protected single-WebView browsing. Fresh installs 
 3. Use an Android emulator or device with internet access.
 4. Run the `app` configuration.
 
-Fresh installs default to the local Browse Home. A previously selected profile remains the startup profile.
+Fresh installs default to the local Browse Home. Later launches restore the previous tab set and selected tab from local metadata.
 
 ## Architecture
 
@@ -50,6 +52,7 @@ Fresh installs default to the local Browse Home. A previously selected profile r
 - `GenericWebProfile.kt`: conservative cross-domain browsing policy.
 - `SiteProfileRegistry.kt`: profile list and URL/host matching.
 - `GenericBlockerEngine.kt`: profile and page-type-driven blocker decisions.
+- `BrowserTabs.kt`: persisted tab/session model, stable IDs, bounded manager, LRU policy, safe codec, and SharedPreferences repository.
 - `SiteShieldWebViewClient.kt`: WebView navigation/resource enforcement.
 - `DownloadModels.kt`: pure request normalization, gesture intent, URL policy, filename/MIME, status, and progress models.
 - `DownloadCoordinator.kt`: Android `DownloadManager`, privacy-minimal metadata persistence, status queries, cancellation, and content-URI opening.
@@ -68,11 +71,21 @@ Most new-site work should stay in the new profile file.
 
 ## Navigation ownership
 
+- Every live tab constructs its own `SiteShieldWebViewClient`, `TopLevelContextStore`, and `TopLevelProfileHistory`; switching the visible tab never reassigns a shared client.
 - Omnibox, Browse Home shortcuts, and user-gesture new-window links call an explicit-navigation entry point that resolves and atomically installs exactly one destination profile before loading.
 - Generic top-level navigation can move between arbitrary HTTP(S) sites and activates an optimized profile when the destination is registered.
 - A specialized profile keeps ownership while evaluating page-driven redirects and offsite links. An unknown callback never silently turns a protected-site redirect into Generic browsing.
 - Subframes and subresources always use the immutable active top-level context. `shouldInterceptRequest()` reads request data plus the atomic snapshot and never calls WebView APIs.
 - Back/Forward prepares the exact session-recorded profile for the destination history entry. The map is memory-only and stores no persistent browser history.
+
+## Tabs and session persistence v1
+
+- Shield > Tabs selects, closes, or creates a Browse Home tab. The six-tab limit never silently evicts a logical tab; closing the final tab creates a clean Browse tab.
+- The selected tab and up to two recent background tabs may remain live. Selecting a fourth live tab suspends the least-recently-used background tab by detaching and destroying only that WebView. Cookies, Chromium cache, DOM storage, IndexedDB, and WebView-managed service-worker data are not cleared.
+- Background live WebViews receive per-view `onPause()` and resume when selected. Global `pauseTimers()` is intentionally not used.
+- Suspended/process-restored tabs rebuild through the same hardened WebView configuration and client path, load their saved HTTPS URL using normal `LOAD_DEFAULT` cache semantics, then perform one bounded best-effort `scrollY` restore.
+- Persisted URLs retain only HTTPS origin/path; user-info, query, and fragment are omitted because they can contain tokens or user input. Session metadata never includes cookies, headers, credentials, POST bodies, form content, HTML/DOM, JavaScript state, or download auth data. There is no cloud/session sync or custom HTTP cache.
+- Live WebView back/forward history remains native. After suspension or process death, only the current URL is guaranteed; JS heap, form drafts, video position, and dynamic DOM state are not.
 
 ## Downloads v1
 

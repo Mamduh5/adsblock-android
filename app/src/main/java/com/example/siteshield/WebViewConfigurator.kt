@@ -5,6 +5,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 
 object WebViewConfigurator {
+    const val NORMAL_CACHE_MODE = WebSettings.LOAD_DEFAULT
+
     fun configure(webView: WebView, profile: SiteProfile, dataSaverMode: DataSaverMode) {
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -25,7 +27,7 @@ object WebViewConfigurator {
             allowContentAccess = false
             builtInZoomControls = false
             displayZoomControls = false
-            cacheMode = WebSettings.LOAD_DEFAULT
+            cacheMode = NORMAL_CACHE_MODE
             userAgentString = "$userAgentString SiteShieldMobile/1.0"
         }
 

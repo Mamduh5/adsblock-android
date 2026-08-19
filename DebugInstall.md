@@ -27,6 +27,19 @@ adb shell am start -W -n com.example.siteshield/.MainActivity
 adb logcat -d -v time | findstr /I /C:"FATAL EXCEPTION" /C:"AndroidRuntime" /C:"A WebView method was called on thread" /C:"chromium" /C:"com.example.siteshield"
 adb shell pidof com.example.siteshield
 
+## Tabs + Session Persistence v1 physical test
+
+1. Create six tabs from Shield > Tabs: Mangakakalot, YouTube, Facebook, and Generic Browse among them. Verify a seventh tab explains the six-tab limit.
+2. Switch among three tabs and verify pages return live; confirm hidden media pauses acceptably and resumes when selected.
+3. Select enough tabs to exceed the three-live-WebView budget. Return to the oldest tab and verify it reloads through Site Shield and restores approximate scroll after layout.
+4. In separate tabs, verify Mangakakalot popup blocking, Generic cross-domain browsing, Facebook, and YouTube retain their own profiles. A popup or background request must log its originating profile, not the visible tab's profile.
+5. Trigger a deliberate safe download in one tab, switch tabs, and confirm another tab cannot consume the first tab's gesture token.
+6. Background and reopen the app without force-stop; verify the live selected page remains useful. Then force-stop/relaunch and verify tab order, selected tab, URLs/profiles, titles, and approximate scroll reconstruct without eagerly loading every tab.
+7. Verify login cookies and normal cache/site storage survive switching, suspension, and relaunch. Do not enter or expose test credentials in logs.
+8. Observe memory with one tab, three live tabs, and six logical tabs. Confirm only three WebViews remain live and no OOM/renderer loop occurs.
+
+Process death cannot restore JS heap, form drafts, exact dynamic DOM, native back/forward history, video timestamp, or unsent POST state. It restores safe metadata and lets Chromium/WebView use its normal persistent cache and site storage.
+
 ## Downloads v1 physical test
 
 1. Serve or open a safe page containing a small PDF, image, and ZIP/text link.
@@ -42,4 +55,4 @@ Downloads v1 does not support `blob:`, `data:`, or `filesystem:` URLs and must n
 
 ## Download security log check
 
-adb logcat -d -v time | findstr /I /C:"FATAL EXCEPTION" /C:"AndroidRuntime" /C:"A WebView method was called on thread" /C:"SecurityException" /C:"FileUriExposedException" /C:"com.example.siteshield"
+adb logcat -d -v time | findstr /I /C:"FATAL EXCEPTION" /C:"AndroidRuntime" /C:"A WebView method was called on thread" /C:"SecurityException" /C:"FileUriExposedException" /C:"OutOfMemoryError" /C:"renderer" /C:"com.example.siteshield"

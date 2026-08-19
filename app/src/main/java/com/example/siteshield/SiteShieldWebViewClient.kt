@@ -9,6 +9,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
 import android.widget.Toast
 import java.io.ByteArrayInputStream
 
@@ -19,19 +20,26 @@ class SiteShieldWebViewClient(
     private val dataSaverModeStore: DataSaverModeStore,
     private val adaptiveShieldController: AdaptiveShieldController,
     initialProfile: SiteProfile,
+    initialUrl: String? = null,
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
     private val onPageLoaded: (WebView) -> Unit,
     private val onPageUsageCheckpoint: () -> Unit,
     private val onTopLevelNavigationStarted: (SiteProfile, String?) -> Unit,
+    private val onRendererGone: () -> Unit = {},
+    private val onPageReady: (WebView) -> Unit = {},
 ) : WebViewClient() {
     private val profileHistory = TopLevelProfileHistory()
     private val topLevelContext = TopLevelContextStore(
         TopLevelContext(
-            url = null,
+            url = initialUrl,
             profile = initialProfile,
         ),
     )
+
+    init {
+        profileHistory.remember(initialUrl, initialProfile)
+    }
 
     /**
      * Replaces the authoritative top-level context before an app-owned loadUrl call.
@@ -313,7 +321,20 @@ class SiteShieldWebViewClient(
         if (settingsStore.blockerEnabled) {
             onPageLoaded(view)
         }
+        onPageReady(view)
         onPageUsageCheckpoint()
+    }
+
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        onEvent(
+            DebugEvent(
+                category = DebugEventCategory.POLICY_DECISION,
+                message = "WebView renderer ended",
+                detail = "didCrash=${detail.didCrash()}, rendererPriority=${detail.rendererPriorityAtExit()}",
+            ),
+        )
+        onRendererGone()
+        return true
     }
 
     override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {

@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Looper
 import android.os.Message
 import android.os.SystemClock
+import android.os.Handler
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -34,16 +35,30 @@ import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
+    private data class TabRuntime(
+        val tabId: String,
+        val webView: WebView,
+        val client: SiteShieldWebViewClient,
+        val downloadIntentTracker: DownloadIntentTracker,
+    )
+
     private val blockerEngine = GenericBlockerEngine()
     private lateinit var settingsStore: SettingsStore
     private lateinit var dataSaverModeStore: DataSaverModeStore
     private lateinit var dataUsageTracker: DataUsageTracker
     private lateinit var downloadCoordinator: DownloadCoordinator
     private lateinit var adaptiveShieldController: AdaptiveShieldController
+    private lateinit var sessionRepository: BrowserSessionRepository
+    private lateinit var tabManager: BrowserTabManager
+    private val tabRuntimes = linkedMapOf<String, TabRuntime>()
+    private val pendingScrollRestores = mutableMapOf<String, Int>()
+    private val persistenceHandler = Handler(Looper.getMainLooper())
+    private val persistSessionRunnable = Runnable { persistSessionNow() }
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var webViewClient: SiteShieldWebViewClient
     private lateinit var browseHome: View
+    private lateinit var contentLayer: FrameLayout
     private lateinit var domainText: TextView
     private lateinit var profileButton: Button
     private lateinit var logText: TextView
@@ -58,8 +73,8 @@ class MainActivity : Activity() {
     private lateinit var adaptiveModeButton: Button
     private lateinit var dataUsageText: TextView
     private lateinit var searchProviderButton: Button
+    private lateinit var tabsButton: Button
     private val eventLog = DebugEventLog(MAX_EVENTS)
-    private val downloadIntentTracker = DownloadIntentTracker(clockMs = SystemClock::elapsedRealtime)
     private var debugFilter: DebugEventCategory? = null
     private var shieldUiState = ShieldUiState()
 
@@ -67,7 +82,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settingsStore = SettingsStore(this)
-        activeProfile = SiteProfileRegistry.byId(settingsStore.selectedProfileId)
+        sessionRepository = SharedPreferencesBrowserSessionRepository(this)
+        tabManager = BrowserTabManager(sessionRepository.load())
+        activeProfile = SiteProfileRegistry.byId(tabManager.selectedTab().profileId)
         dataSaverModeStore = DataSaverModeStore(settingsStore.dataSaverMode)
         dataUsageTracker = DataUsageTracker(AndroidNetworkCounterProvider, activeProfile.id)
         downloadCoordinator = DownloadCoordinator(this, onEvent = ::recordEvent)
@@ -81,18 +98,10 @@ class MainActivity : Activity() {
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
-        webView = WebView(this)
-        WebViewConfigurator.configure(webView, activeProfile, dataSaverModeStore.snapshot())
-
-        val dataCleaner = SiteDataCleaner(
-            webView = webView,
-            blockerEngine = blockerEngine,
-            currentProfile = { activeProfile },
-            onEvent = ::recordEvent,
-        )
-        val root = buildUi(dataCleaner)
+        val initialRuntime = createTabRuntime(tabManager.selectedTab())
+        activateRuntime(initialRuntime)
+        val root = buildUi()
         setContentView(root)
-        observeWebViewDoubleTaps()
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.PROFILE,
@@ -114,112 +123,18 @@ class MainActivity : Activity() {
             ),
         )
 
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onReceivedTitle(view: WebView, title: String?) {
-                updateHeader(title)
-            }
-
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                val message = consoleMessage.message()
-                if (message.startsWith(DOM_LOG_PREFIX)) {
-                    recordEvent(
-                        DebugEvent(
-                            category = DebugEventCategory.DOM_CLEANUP,
-                            message = message.removePrefix(DOM_LOG_PREFIX).trim(),
-                        ),
-                    )
-                    return true
-                }
-                return super.onConsoleMessage(consoleMessage)
-            }
-
-            override fun onCreateWindow(
-                view: WebView,
-                isDialog: Boolean,
-                isUserGesture: Boolean,
-                resultMsg: Message?,
-            ): Boolean {
-                val sourceContext = webViewClient.topLevelContextSnapshot()
-                if (!isUserGesture || resultMsg == null) {
-                    recordEvent(
-                        DebugEvent(
-                            category = DebugEventCategory.POPUP_BLOCK,
-                            message = "[${sourceContext.profile.displayName}] Blocked new-window request",
-                            detail = "sourceProfile=${sourceContext.profile.id}, " +
-                                "sourcePageType=${blockerEngine.classifyPageType(sourceContext.profile, sourceContext.url)}, " +
-                                "hasGesture=$isUserGesture, onCreateWindow=true, actionView=false, loadUrl=false",
-                        ),
-                    )
-                    return false
-                }
-                val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-                val popupView = WebView(this@MainActivity)
-                popupView.webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        popup: WebView,
-                        request: WebResourceRequest,
-                    ): Boolean = openPopupInMainView(
-                        popup,
-                        request.url.toString(),
-                        sourceContext,
-                        isUserGesture,
-                    )
-
-                    @Suppress("DEPRECATION")
-                    override fun shouldOverrideUrlLoading(popup: WebView, url: String): Boolean =
-                        openPopupInMainView(popup, url, sourceContext, isUserGesture)
-                }
-                transport.webView = popupView
-                resultMsg.sendToTarget()
-                return true
-            }
-        }
-
-        webViewClient = SiteShieldWebViewClient(
-            context = this,
-            settingsStore = settingsStore,
-            blockerEngine = blockerEngine,
-            dataSaverModeStore = dataSaverModeStore,
-            adaptiveShieldController = adaptiveShieldController,
-            initialProfile = activeProfile,
-            onProfileMatched = ::setActiveProfile,
-            onEvent = ::recordEvent,
-            onPageLoaded = { view ->
-                injectDomCleanup(view)
-                inspectAdaptivePageHealth(view)
-            },
-            onPageUsageCheckpoint = ::updateDataUsageReadout,
-            onTopLevelNavigationStarted = ::onTopLevelNavigationStarted,
-        )
-        webView.webViewClient = webViewClient
-        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
-            val request = DownloadRequestInfo.fromWebViewCallback(
-                url = url,
-                userAgent = userAgent,
-                contentDisposition = contentDisposition,
-                mimeType = mimeType,
-                contentLength = contentLength,
-            )
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                handleDownloadRequest(request)
-            } else {
-                runOnUiThread { handleDownloadRequest(request) }
-            }
-        }
-
-        if (savedInstanceState == null) {
-            if (activeProfile.id == GenericWebProfile.profile.id) {
-                showBrowseHome()
-            } else {
-                navigateExplicitUrl(activeProfile.startUrl)
-            }
+        val selected = tabManager.selectedTab()
+        if (selected.currentUrl == null) {
+            showBrowseHome()
         } else {
-            webView.restoreState(savedInstanceState)
+            webViewClient.prepareExplicitNavigation(selected.currentUrl)
+            webView.loadUrl(selected.currentUrl)
         }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        webView.saveState(outState)
+        checkpointActiveScroll()
+        persistSessionNow()
         super.onSaveInstanceState(outState)
     }
 
@@ -235,16 +150,47 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::webView.isInitialized) webView.onResume()
+    }
+
+    override fun onPause() {
+        if (::webView.isInitialized) webView.onPause()
+        checkpointActiveScroll()
+        scheduleSessionPersistence()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        persistSessionNow()
+        super.onStop()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val memoryPressure = level == TRIM_MEMORY_RUNNING_LOW ||
+            level == TRIM_MEMORY_RUNNING_CRITICAL ||
+            level >= TRIM_MEMORY_BACKGROUND
+        if (memoryPressure) {
+            suspendExcessRuntimes(allBackground = true)
+            persistSessionNow()
+        }
+    }
+
     override fun onDestroy() {
         dataUsageTracker.flush()
-        downloadIntentTracker.clear()
+        persistenceHandler.removeCallbacks(persistSessionRunnable)
+        checkpointActiveScroll()
+        persistSessionNow()
         downloadCoordinator.close()
         adaptiveShieldController.close()
-        webView.destroy()
+        tabRuntimes.values.toList().forEach(::destroyRuntime)
         super.onDestroy()
     }
 
-    private fun buildUi(dataCleaner: SiteDataCleaner): View {
+    private fun buildUi(): View {
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             layoutParams = ViewGroup.LayoutParams(
@@ -252,7 +198,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
-        val contentLayer = FrameLayout(this).apply {
+        contentLayer = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -289,6 +235,11 @@ class MainActivity : Activity() {
             showDownloadsDialog()
         }
 
+        tabsButton = largeButton("Tabs (${tabManager.allTabs().size})") {
+            collapseShieldPanel()
+            showTabsDialog()
+        }
+
         val cleanupButton = smallButton("Cleanup") {
             injectDomCleanup(webView)
         }
@@ -315,7 +266,12 @@ class MainActivity : Activity() {
         }
 
         val dataCleanButton = smallButton("Data") {
-            dataCleaner.cleanSuspiciousSiteData()
+            SiteDataCleaner(
+                webView = webView,
+                blockerEngine = blockerEngine,
+                currentProfile = { activeProfile },
+                onEvent = ::recordEvent,
+            ).cleanSuspiciousSiteData()
             Toast.makeText(this, "Suspicious site data cleanup ran", Toast.LENGTH_SHORT).show()
         }
 
@@ -323,7 +279,15 @@ class MainActivity : Activity() {
             val updatedMode = dataSaverModeStore.snapshot().next()
             settingsStore.dataSaverMode = updatedMode
             dataSaverModeStore.update(updatedMode)
-            applyDataSaverPolicy(activeProfile, webView.url)
+            tabRuntimes.values.forEach { runtime ->
+                val context = runtime.client.topLevelContextSnapshot()
+                WebViewConfigurator.applyDataSaverPolicy(
+                    runtime.webView,
+                    updatedMode,
+                    context.profile,
+                    blockerEngine.classifyPageType(context.profile, context.url ?: context.profile.startUrl),
+                )
+            }
             dataSaverButton.text = dataSaverButtonLabel()
             updateDataUsageReadout()
             recordEvent(
@@ -469,7 +433,7 @@ class MainActivity : Activity() {
         }.apply {
             addView(domainText)
             addView(controlRow(backButton, forwardButton, reloadButton))
-            addView(controlRow(browseButton, downloadsButton))
+            addView(controlRow(browseButton, tabsButton, downloadsButton))
             addView(profileButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -576,15 +540,278 @@ class MainActivity : Activity() {
             }
         }
 
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+    private fun createTabRuntime(tab: BrowserTabState): TabRuntime {
+        val profile = SiteProfileRegistry.byId(tab.profileId)
+        val tabWebView = WebView(this)
+        WebViewConfigurator.configure(tabWebView, profile, dataSaverModeStore.snapshot())
+        val tracker = DownloadIntentTracker(clockMs = SystemClock::elapsedRealtime)
+        lateinit var runtime: TabRuntime
+        val client = SiteShieldWebViewClient(
+            context = this,
+            settingsStore = settingsStore,
+            blockerEngine = blockerEngine,
+            dataSaverModeStore = dataSaverModeStore,
+            adaptiveShieldController = adaptiveShieldController,
+            initialProfile = profile,
+            initialUrl = tab.currentUrl,
+            onProfileMatched = { matched -> onTabProfileMatched(tab.id, matched) },
+            onEvent = ::recordEvent,
+            onPageLoaded = { view ->
+                injectDomCleanup(view)
+                inspectAdaptivePageHealth(view)
+            },
+            onPageUsageCheckpoint = ::updateDataUsageReadout,
+            onTopLevelNavigationStarted = { matched, url ->
+                onTabNavigationStarted(tab.id, tabWebView, matched, url)
+            },
+            onRendererGone = { onTabRendererGone(tab.id) },
+            onPageReady = { restorePendingScroll(tab.id) },
+        )
+        runtime = TabRuntime(tab.id, tabWebView, client, tracker)
+        tabWebView.webViewClient = client
+        tabWebView.webChromeClient = tabChromeClient(runtime)
+        tabWebView.setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+            val request = DownloadRequestInfo.fromWebViewCallback(
+                url, userAgent, contentDisposition, mimeType, contentLength,
+            )
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                handleDownloadRequest(tab.id, request)
+            } else {
+                runOnUiThread { handleDownloadRequest(tab.id, request) }
+            }
+        }
+        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent): Boolean = true
+            override fun onDoubleTap(event: MotionEvent): Boolean {
+                if (tabManager.selectedTabId == tab.id) {
+                    shieldUiState = shieldUiState.onWebViewDoubleTap()
+                    syncShieldUi()
+                }
+                return true
+            }
+        })
+        tabWebView.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_UP) tracker.recordGesture()
+            detector.onTouchEvent(event)
+            false
+        }
+        tabRuntimes[tab.id] = runtime
+        tabManager.markLive(tab.id)
+        if (tab.scrollY > 0) pendingScrollRestores[tab.id] = tab.scrollY
+        return runtime
+    }
+
+    private fun tabChromeClient(runtime: TabRuntime): WebChromeClient = object : WebChromeClient() {
+        override fun onReceivedTitle(view: WebView, title: String?) {
+            tabManager.updateTitle(runtime.tabId, title)
+            scheduleSessionPersistence()
+            if (tabManager.selectedTabId == runtime.tabId) updateHeader(title)
+        }
+
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+            val message = consoleMessage.message()
+            if (!message.startsWith(DOM_LOG_PREFIX)) return super.onConsoleMessage(consoleMessage)
+            recordEvent(DebugEvent(DebugEventCategory.DOM_CLEANUP, message.removePrefix(DOM_LOG_PREFIX).trim()))
+            return true
+        }
+
+        override fun onCreateWindow(
+            view: WebView,
+            isDialog: Boolean,
+            isUserGesture: Boolean,
+            resultMsg: Message?,
+        ): Boolean {
+            val sourceContext = runtime.client.topLevelContextSnapshot()
+            if (!isUserGesture || resultMsg == null) {
+                recordEvent(
+                    DebugEvent(
+                        DebugEventCategory.POPUP_BLOCK,
+                        "[${sourceContext.profile.displayName}] Blocked new-window request",
+                        "tab=${runtime.tabId}, sourceProfile=${sourceContext.profile.id}, " +
+                            "sourcePageType=${blockerEngine.classifyPageType(sourceContext.profile, sourceContext.url)}, " +
+                            "hasGesture=$isUserGesture, onCreateWindow=true, actionView=false, loadUrl=false",
+                    ),
+                )
+                return false
+            }
+            val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+            val popupView = WebView(this@MainActivity)
+            popupView.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(popup: WebView, request: WebResourceRequest): Boolean =
+                    openPopupInTab(runtime, popup, request.url.toString(), sourceContext, isUserGesture)
+
+                @Suppress("DEPRECATION")
+                override fun shouldOverrideUrlLoading(popup: WebView, url: String): Boolean =
+                    openPopupInTab(runtime, popup, url, sourceContext, isUserGesture)
+            }
+            transport.webView = popupView
+            resultMsg.sendToTarget()
+            return true
+        }
+    }
+
+    private fun activateRuntime(runtime: TabRuntime) {
+        webView = runtime.webView
+        webViewClient = runtime.client
+        activeProfile = runtime.client.topLevelContextSnapshot().profile
+    }
+
+    private fun selectTab(tabId: String, checkpointCurrent: Boolean = true) {
+        if (checkpointCurrent) checkpointActiveScroll()
+        tabRuntimes[tabManager.selectedTabId]?.webView?.onPause()
+        val selected = tabManager.select(tabId) ?: return
+        val wasSuspended = tabRuntimes[tabId] == null
+        val runtime = tabRuntimes[tabId] ?: createTabRuntime(selected)
+        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
+        if (::contentLayer.isInitialized) contentLayer.addView(runtime.webView, 0)
+        activateRuntime(runtime)
+        runtime.webView.onResume()
+        settingsStore.selectedProfileId = activeProfile.id
+        dataUsageTracker.switchProfile(activeProfile.id)
+        browseHome.visibility = if (selected.currentUrl == null) View.VISIBLE else View.GONE
+        if (wasSuspended && selected.currentUrl != null) {
+            runtime.client.prepareExplicitNavigation(selected.currentUrl)
+            runtime.webView.loadUrl(selected.currentUrl)
+        }
+        updateHeader(selected.title)
+        updateTabsButton()
+        suspendExcessRuntimes()
+        scheduleSessionPersistence()
+    }
+
+    private fun closeTab(tabId: String) {
+        if (tabId == tabManager.selectedTabId) checkpointActiveScroll()
+        tabRuntimes.remove(tabId)?.let(::destroyRuntime)
+        val result = tabManager.close(tabId) ?: return
+        selectTab(result.selectedTabId, checkpointCurrent = false)
+        updateTabsButton()
+        scheduleSessionPersistence()
+    }
+
+    private fun suspendExcessRuntimes(allBackground: Boolean = false) {
+        val candidates = if (allBackground) {
+            tabRuntimes.keys.filter { it != tabManager.selectedTabId }
+        } else {
+            tabManager.suspensionCandidates()
+        }
+        candidates.forEach { id -> tabRuntimes.remove(id)?.let(::destroyRuntime) }
+    }
+
+    private fun destroyRuntime(runtime: TabRuntime) {
+        tabManager.updateScroll(runtime.tabId, runtime.webView.scrollY)
+        tabManager.markSuspended(runtime.tabId)
+        runtime.downloadIntentTracker.clear()
+        pendingScrollRestores.remove(runtime.tabId)
+        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
+        runtime.webView.stopLoading()
+        runtime.webView.setDownloadListener(null)
+        runtime.webView.webChromeClient = null
+        runtime.webView.webViewClient = WebViewClient()
+        runtime.webView.destroy()
+    }
+
+    private fun onTabRendererGone(tabId: String) {
+        val runtime = tabRuntimes.remove(tabId) ?: return
+        destroyRuntime(runtime)
+        scheduleSessionPersistence()
+        if (tabId == tabManager.selectedTabId) {
+            persistenceHandler.post { selectTab(tabId, checkpointCurrent = false) }
+        }
+    }
+
+    private fun showTabsDialog() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        lateinit var dialog: android.app.AlertDialog
+        tabManager.allTabs().forEach { tab ->
+            val selected = tab.id == tabManager.selectedTabId
+            val state = if (tabManager.runtimeState(tab.id) == BrowserTabRuntimeState.LIVE) "live" else "suspended"
+            val label = "${if (selected) "●" else "○"} ${tab.title ?: SiteProfileRegistry.byId(tab.profileId).displayName}\n" +
+                "${tab.currentUrl?.hostFromUrl() ?: "Browse Home"} · $state"
+            val row = controlRow(
+                largeButton(label) { dialog.dismiss(); selectTab(tab.id) },
+                smallButton("Close") { dialog.dismiss(); closeTab(tab.id); showTabsDialog() },
+            )
+            content.addView(row)
+        }
+        val scroll = ScrollView(this).apply { addView(content) }
+        dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Tabs (${tabManager.allTabs().size}/${BrowserTabConfig.MAX_TABS})")
+            .setView(scroll)
+            .setNegativeButton("Close", null)
+            .setPositiveButton("+ New Tab", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                when (val result = tabManager.createTab()) {
+                    CreateTabResult.LimitReached -> Toast.makeText(
+                        this, "Maximum ${BrowserTabConfig.MAX_TABS} tabs reached", Toast.LENGTH_SHORT,
+                    ).show()
+                    is CreateTabResult.Created -> {
+                        dialog.dismiss()
+                        updateTabsButton()
+                        selectTab(result.tab.id)
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun updateTabsButton() {
+        if (::tabsButton.isInitialized) tabsButton.text = "Tabs (${tabManager.allTabs().size})"
+    }
+
+    private fun checkpointActiveScroll() {
+        if (::webView.isInitialized && ::tabManager.isInitialized) {
+            tabManager.updateScroll(tabManager.selectedTabId, webView.scrollY)
+        }
+    }
+
+    private fun restorePendingScroll(tabId: String) {
+        val scrollY = pendingScrollRestores.remove(tabId) ?: return
+        persistenceHandler.postDelayed({
+            tabRuntimes[tabId]?.webView?.scrollTo(0, scrollY)
+        }, BrowserTabConfig.SCROLL_RESTORE_DELAY_MS)
+    }
+
+    private fun scheduleSessionPersistence() {
+        persistenceHandler.removeCallbacks(persistSessionRunnable)
+        persistenceHandler.postDelayed(persistSessionRunnable, BrowserTabConfig.PERSISTENCE_DEBOUNCE_MS)
+    }
+
+    private fun persistSessionNow() {
+        if (::sessionRepository.isInitialized && ::tabManager.isInitialized) {
+            sessionRepository.save(tabManager.snapshot())
+        }
+    }
+
     private fun collapseShieldPanel() {
         shieldUiState = shieldUiState.afterTopLevelNavigation()
         syncShieldUi()
     }
 
-    private fun onTopLevelNavigationStarted(profile: SiteProfile, url: String?) {
-        if (::browseHome.isInitialized) browseHome.visibility = View.GONE
-        applyDataSaverPolicy(profile, url)
-        collapseShieldPanel()
+    private fun onTabNavigationStarted(
+        tabId: String,
+        ownerWebView: WebView,
+        profile: SiteProfile,
+        url: String?,
+    ) {
+        tabManager.updateNavigation(tabId, url, profile.id)
+        WebViewConfigurator.applyDataSaverPolicy(
+            ownerWebView,
+            dataSaverModeStore.snapshot(),
+            profile,
+            blockerEngine.classifyPageType(profile, url ?: profile.startUrl),
+        )
+        scheduleSessionPersistence()
+        if (tabId == tabManager.selectedTabId) {
+            if (::browseHome.isInitialized) browseHome.visibility = View.GONE
+            collapseShieldPanel()
+        }
     }
 
     private fun searchProviderButtonLabel(): String =
@@ -649,7 +876,8 @@ class MainActivity : Activity() {
         webView.loadUrl(url)
     }
 
-    private fun openPopupInMainView(
+    private fun openPopupInTab(
+        runtime: TabRuntime,
         popupView: WebView,
         url: String,
         sourceContext: TopLevelContext,
@@ -659,9 +887,10 @@ class MainActivity : Activity() {
         val target = OmniboxInputParser.parse(url)
         if (
             target is NavigationTarget.Url &&
-            webViewClient.allowPopupNavigation(sourceContext, target.url, hasUserGesture)
+            runtime.client.allowPopupNavigation(sourceContext, target.url, hasUserGesture)
         ) {
-            navigateExplicitUrl(target.url)
+            runtime.client.prepareExplicitNavigation(target.url)
+            runtime.webView.loadUrl(target.url)
         } else if (target !is NavigationTarget.Url) {
             recordEvent(
                 DebugEvent(
@@ -686,6 +915,9 @@ class MainActivity : Activity() {
     private fun showBrowseHome() {
         webViewClient.prepareExplicitNavigation(GenericWebProfile.profile.startUrl)
         setActiveProfile(GenericWebProfile.profile)
+        tabManager.updateNavigation(tabManager.selectedTabId, null, GenericWebProfile.profile.id)
+        tabManager.updateTitle(tabManager.selectedTabId, "Browse")
+        scheduleSessionPersistence()
         browseHome.visibility = View.VISIBLE
         collapseShieldPanel()
     }
@@ -850,8 +1082,10 @@ class MainActivity : Activity() {
 
     private fun inspectAdaptivePageHealth(view: WebView) {
         if (adaptiveShieldController.mode() != AdaptiveShieldMode.AUTO_SAFE) return
-        val profile = activeProfile
-        val pageUrl = view.url
+        val context = tabRuntimes.values.firstOrNull { it.webView === view }
+            ?.client?.topLevelContextSnapshot() ?: return
+        val profile = context.profile
+        val pageUrl = view.url ?: context.url
         val pageType = blockerEngine.classifyPageType(profile, pageUrl)
         if (profile.id != MangakakalotProfile.profile.id || pageType != PageType.CHAPTER_READER) return
         val script = """
@@ -897,10 +1131,9 @@ class MainActivity : Activity() {
         dataUsageText.text = if (!usage.countersSupported) {
             "Session data: unavailable"
         } else {
-            val activeUsage = usage.byProfile[activeProfile.id] ?: DataUsage()
             "Session data: ${formatDataBytes(usage.session.totalBytes)}\n" +
                 "RX ${formatDataBytes(usage.session.rxBytes)}  TX ${formatDataBytes(usage.session.txBytes)}" +
-                "  ${activeProfile.displayName} ${formatDataBytes(activeUsage.totalBytes)}"
+                "  App-wide; per-tab bytes unavailable"
         }
     }
 
@@ -922,27 +1155,10 @@ class MainActivity : Activity() {
             minimumHeight = dp(50)
         }
 
-    @SuppressLint("ClickableViewAccessibility")
-    private fun observeWebViewDoubleTaps() {
-        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(event: MotionEvent): Boolean = true
-
-            override fun onDoubleTap(event: MotionEvent): Boolean {
-                shieldUiState = shieldUiState.onWebViewDoubleTap()
-                syncShieldUi()
-                return true
-            }
-        })
-        webView.setOnTouchListener { _, event ->
-            if (event.actionMasked == MotionEvent.ACTION_UP) {
-                downloadIntentTracker.recordGesture()
-            }
-            detector.onTouchEvent(event)
-            false
-        }
-    }
-
-    private fun handleDownloadRequest(request: DownloadRequestInfo?) {
+    private fun handleDownloadRequest(tabId: String, request: DownloadRequestInfo?) {
+        val runtime = tabRuntimes[tabId] ?: return
+        val sourceContext = runtime.client.topLevelContextSnapshot()
+        val sourceProfile = sourceContext.profile
         if (request == null) {
             recordEvent(DebugEvent(DebugEventCategory.DOWNLOAD, "download-blocked", "reason=missing-url"))
             Toast.makeText(this, "This download is not supported", Toast.LENGTH_SHORT).show()
@@ -950,12 +1166,12 @@ class MainActivity : Activity() {
         }
         val policy = DownloadPolicy.decide(request.url)
         if (policy is DownloadPolicyDecision.Block) {
-            downloadIntentTracker.clear()
+            runtime.downloadIntentTracker.clear()
             recordEvent(
                 DebugEvent(
                     category = DebugEventCategory.DOWNLOAD,
                     message = "download-blocked",
-                    detail = "host=${policy.host ?: "unknown"}, profile=${activeProfile.id}, reason=${policy.reason}",
+                    detail = "host=${policy.host ?: "unknown"}, tab=$tabId, profile=${sourceProfile.id}, reason=${policy.reason}",
                 ),
             )
             val message = if (policy.reason == DownloadBlockReason.UNSUPPORTED_INLINE_DATA) {
@@ -967,29 +1183,29 @@ class MainActivity : Activity() {
             return
         }
         val blockerDecision = if (settingsStore.blockerEnabled) {
-            blockerEngine.resourceDecision(activeProfile, request.url, webView.url)
+            blockerEngine.resourceDecision(sourceProfile, request.url, sourceContext.url)
         } else {
             BlockDecision.Allow
         }
         if (blockerDecision is BlockDecision.Block) {
-            downloadIntentTracker.clear()
+            runtime.downloadIntentTracker.clear()
             recordEvent(
                 DebugEvent(
                     category = DebugEventCategory.DOWNLOAD,
                     message = "download-blocked",
-                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, profile=${activeProfile.id}, " +
+                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, tab=$tabId, profile=${sourceProfile.id}, " +
                         "reason=blocker-${blockerDecision.reason}, ruleId=${blockerDecision.ruleId ?: "none"}",
                 ),
             )
             Toast.makeText(this, "Download blocked by Site Shield", Toast.LENGTH_LONG).show()
             return
         }
-        if (!downloadIntentTracker.consumeIfRecent()) {
+        if (!runtime.downloadIntentTracker.consumeIfRecent()) {
             recordEvent(
                 DebugEvent(
                     category = DebugEventCategory.DOWNLOAD,
                     message = "download-blocked",
-                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, profile=${activeProfile.id}, reason=no-recent-user-gesture",
+                    detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, tab=$tabId, profile=${sourceProfile.id}, reason=no-recent-user-gesture",
                 ),
             )
             Toast.makeText(this, "Blocked automatic download", Toast.LENGTH_SHORT).show()
@@ -1002,10 +1218,10 @@ class MainActivity : Activity() {
                 category = DebugEventCategory.DOWNLOAD,
                 message = "download-request",
                 detail = "host=${(policy as DownloadPolicyDecision.Allow).host}, mime=${prepared.mimeType}, " +
-                    "filename=${prepared.filename}, profile=${activeProfile.id}",
+                    "filename=${prepared.filename}, tab=$tabId, profile=${sourceProfile.id}",
             ),
         )
-        val profileId = activeProfile.id
+        val profileId = sourceProfile.id
         val size = request.contentLength?.let(::formatDataBytes) ?: "Unknown"
         val warning = if (prepared.dangerousFileType) {
             "\n\nWarning: This file may be executable or installable. Site Shield will not run or install it."
@@ -1130,13 +1346,16 @@ class MainActivity : Activity() {
     }
 
     private fun injectDomCleanup(view: WebView) {
-        val pageUrl = view.url ?: activeProfile.startUrl
-        val pageType = blockerEngine.classifyPageType(activeProfile, pageUrl)
-        val domRules = blockerEngine.domRulesForUrl(activeProfile, pageUrl)
+        val context = tabRuntimes.values.firstOrNull { it.webView === view }
+            ?.client?.topLevelContextSnapshot() ?: return
+        val profile = context.profile
+        val pageUrl = view.url ?: context.url ?: profile.startUrl
+        val pageType = blockerEngine.classifyPageType(profile, pageUrl)
+        val domRules = blockerEngine.domRulesForUrl(profile, pageUrl)
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.DOM_CLEANUP,
-                message = "[${activeProfile.displayName}] Reader cleanup requested",
+                message = "[${profile.displayName}] Reader cleanup requested",
                 detail = "pageType=$pageType, url=$pageUrl",
             ),
         )
@@ -1146,7 +1365,6 @@ class MainActivity : Activity() {
             append(";\n")
             append(assets.open("dom_cleanup.js").bufferedReader().use { it.readText() })
         }
-        val profile = activeProfile
         view.evaluateJavascript(script) { result ->
             val cleanupResult = decodeJavascriptString(result)
             recordEvent(
@@ -1188,6 +1406,7 @@ class MainActivity : Activity() {
         if (::activeProfile.isInitialized && activeProfile.id == profile.id) return
         dataUsageTracker.switchProfile(profile.id)
         activeProfile = profile
+        tabManager.updateNavigation(tabManager.selectedTabId, webView.url, profile.id)
         settingsStore.selectedProfileId = profile.id
         WebViewConfigurator.applyCookiePolicy(webView, profile)
         applyDataSaverPolicy(profile, webView.url ?: profile.startUrl)
@@ -1205,6 +1424,16 @@ class MainActivity : Activity() {
         )
         updateRuntimeMarkers()
         updateDataUsageReadout()
+        scheduleSessionPersistence()
+    }
+
+    private fun onTabProfileMatched(tabId: String, profile: SiteProfile) {
+        val runtime = tabRuntimes[tabId]
+        val url = runtime?.client?.topLevelContextSnapshot()?.url ?: tabManager.tab(tabId)?.currentUrl
+        tabManager.updateNavigation(tabId, url, profile.id)
+        scheduleSessionPersistence()
+        if (tabId != tabManager.selectedTabId) return
+        setActiveProfile(profile)
     }
 
     private fun updateHeader(title: String?) {
