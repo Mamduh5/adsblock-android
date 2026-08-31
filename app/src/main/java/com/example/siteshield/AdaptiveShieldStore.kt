@@ -27,12 +27,12 @@ class SharedPreferencesAdaptiveStatePersistence(context: Context) : AdaptiveStat
 
     private companion object {
         const val PREFERENCES_NAME = "site_shield_adaptive"
-        const val KEY_STATE = "adaptive_state_v1"
+        const val KEY_STATE = "adaptive_state_v2"
     }
 }
 
 object AdaptiveStateCodec {
-    private const val VERSION = "v1"
+    private const val VERSION = "v2"
     private const val FIELD_SEPARATOR = '\t'
 
     fun encode(records: List<AdaptiveRecord>): String = buildString {
@@ -61,6 +61,7 @@ object AdaptiveStateCodec {
                     record.rejectedAtMs ?: -1L,
                     record.score,
                     record.confidence,
+                    record.siteScope.orEmpty(),
                 ).joinToString(FIELD_SEPARATOR.toString()),
             )
         }
@@ -75,10 +76,16 @@ object AdaptiveStateCodec {
 
     private fun decodeRecord(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
-        if (fields.size != 20) return null
+        if (fields.size != 21) return null
         val profileId = fields[1].safeToken() ?: return null
         val host = fields[4].normalizedHost() ?: return null
         val path = fields[5].takeIf(String::isNotBlank)?.let(::sanitizeAdaptivePath)
+        val siteScope = fields[20]
+            .takeIf(String::isNotBlank)
+            ?.normalizedHost()
+            ?.takeIf { it.length <= 253 && it.matches(Regex("[a-z0-9.-]+")) }
+        if (profileId == GenericWebProfile.profile.id && siteScope == null) return null
+        if (profileId != GenericWebProfile.profile.id && siteScope != null) return null
         AdaptiveRecord(
             id = fields[0].safeId() ?: return null,
             profileId = profileId,
@@ -100,6 +107,7 @@ object AdaptiveStateCodec {
             rejectedAtMs = fields[17].toLong().takeIf { it >= 0 },
             score = fields[18].toNonNegativeInt(),
             confidence = fields[19].toInt().coerceIn(0, 100),
+            siteScope = siteScope,
         )
     }.getOrNull()
 
@@ -163,14 +171,15 @@ class AdaptiveShieldController(
         blockedByStaticRule: Boolean,
         resourceKind: AdaptiveResourceKind,
     ) {
+        val scope = adaptiveScope(profile, pageUrl) ?: return
         val host = requestUrl.hostFromUrl() ?: return
         val observation = AdaptiveObservationFactory.request(
             profile = profile,
             pageUrl = pageUrl,
             requestUrl = requestUrl,
             blockedByStaticRule = blockedByStaticRule,
-            correlatedWithRedirect = engine.hasRedirectEvidence(profile.id, host),
-            functionalEvidence = profile.adaptivePolicy.protects(host, resourceKind),
+            correlatedWithRedirect = engine.hasRedirectEvidence(scope, host),
+            functionalEvidence = profile.adaptivePolicy.isFunctionalEvidence(host, resourceKind),
             resourceKind = resourceKind,
             observedAtMs = clock.nowMs(),
         ) ?: return
@@ -183,16 +192,39 @@ class AdaptiveShieldController(
         requestUrl: String,
         resourceKind: AdaptiveResourceKind,
         blockerEnabled: Boolean,
-    ): AdaptiveDecision = engine.decide(
-        profile = profile,
-        url = requestUrl,
-        pageType = profile.pageTypeRules.firstOrNull { pageUrl != null && it.matches(pageUrl) }?.pageType
-            ?: PageType.UNKNOWN,
-        resourceKind = resourceKind,
-        blockerEnabled = blockerEnabled,
-        mode = mode.get(),
-        nowMs = clock.nowMs(),
-    )
+        userInitiated: Boolean = false,
+    ): AdaptiveDecision {
+        val scope = adaptiveScope(profile, pageUrl) ?: return AdaptiveDecision.Allow
+        return engine.decideRequest(
+            scope = scope,
+            policy = profile.adaptivePolicy,
+            url = requestUrl,
+            resourceKind = resourceKind,
+            userInitiated = userInitiated,
+            blockerEnabled = blockerEnabled,
+            mode = mode.get(),
+            nowMs = clock.nowMs(),
+        )
+    }
+
+    fun decideNavigation(
+        profile: SiteProfile,
+        sourceUrl: String?,
+        targetUrl: String,
+        userInitiated: Boolean,
+        blockerEnabled: Boolean,
+    ): AdaptiveDecision {
+        val scope = adaptiveScope(profile, sourceUrl) ?: return AdaptiveDecision.Allow
+        return engine.decideNavigation(
+            scope = scope,
+            policy = profile.adaptivePolicy,
+            targetUrl = targetUrl,
+            userInitiated = userInitiated,
+            blockerEnabled = blockerEnabled,
+            mode = mode.get(),
+            nowMs = clock.nowMs(),
+        )
+    }
 
     fun reportPageHealth(health: AdaptivePageHealth) {
         val rejected = engine.reportPageHealth(health, clock.nowMs())
@@ -208,18 +240,18 @@ class AdaptiveShieldController(
         if (rejected.isNotEmpty()) schedulePersist()
     }
 
-    fun records(profileId: String): List<AdaptiveRecord> =
-        engine.snapshot(clock.nowMs()).filter { it.profileId == profileId }
+    fun records(scope: AdaptiveScope): List<AdaptiveRecord> =
+        engine.snapshot(clock.nowMs()).filter { it.scope() == scope }
 
-    fun summary(profileId: String): AdaptiveStatusSummary = engine.summary(profileId, clock.nowMs())
+    fun summary(scope: AdaptiveScope): AdaptiveStatusSummary = engine.summary(scope, clock.nowMs())
 
-    fun forget(profileId: String, ruleId: String? = null) {
-        engine.forget(profileId, ruleId)
+    fun forget(scope: AdaptiveScope, ruleId: String? = null) {
+        engine.forget(scope, ruleId)
         persistNow()
     }
 
-    fun disable(profileId: String, ruleId: String) {
-        val disabled = engine.disable(profileId, ruleId, clock.nowMs()) ?: return
+    fun disable(scope: AdaptiveScope, ruleId: String) {
+        val disabled = engine.disable(scope, ruleId, clock.nowMs()) ?: return
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.ADAPTIVE_ROLLBACK,
@@ -273,5 +305,7 @@ class AdaptiveShieldController(
 }
 
 fun AdaptiveRecord.safeDiagnostic(): String =
-    "profile=$profileId, host=$host, type=$type, state=$state, count=$occurrenceCount, " +
-        "confidence=$confidence, ruleId=$id"
+    "scope=${scope().diagnosticName}, profile=$profileId, host=$host, type=$type, state=$state, " +
+        "count=$occurrenceCount, confidence=$confidence, static=$staticBlockCount, " +
+        "thirdParty=$thirdPartyCount, redirects=$redirectCorrelationCount, " +
+        "functional=$functionalEvidenceCount, ruleId=$id"

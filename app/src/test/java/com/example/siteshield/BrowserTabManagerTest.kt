@@ -204,10 +204,13 @@ class BrowserTabManagerTest {
 
         assertNull(restored.selectedTab().currentUrl)
         assertEquals("generic-web", restored.selectedTab().profileId)
+        assertNull(BrowserSessionUrlSanitizer.sanitize("data:text/html,unsafe"))
+        assertNull(BrowserSessionUrlSanitizer.sanitize("intent://example.com"))
+        assertNull(BrowserSessionUrlSanitizer.sanitize("http://example.com/insecure"))
     }
 
     @Test
-    fun `persisted URLs omit query fragment and user info`() {
+    fun `persisted URLs preserve page identity but omit user info`() {
         val snapshot = BrowserSessionSnapshot(
             selectedTabId = "safe",
             tabs = listOf(
@@ -223,7 +226,37 @@ class BrowserTabManagerTest {
 
         val decoded = BrowserSessionCodec.decode(BrowserSessionCodec.encode(snapshot))
 
-        assertEquals("https://example.com/article", decoded?.tabs?.single()?.currentUrl)
+        assertEquals(
+            "https://example.com/article?q=private&token=secret#section",
+            decoded?.tabs?.single()?.currentUrl,
+        )
+    }
+
+    @Test
+    fun `youtube watch query survives codec and manager restore`() {
+        val url = "https://youtube.com/watch?v=abc123&list=PL%2F42&t=90#details"
+        val snapshot = BrowserSessionSnapshot(
+            selectedTabId = "video",
+            tabs = listOf(BrowserTabState("video", url, "youtube", "Video", 1)),
+        )
+
+        val restored = manager(BrowserSessionCodec.decode(BrowserSessionCodec.encode(snapshot)))
+
+        assertEquals(url, restored.selectedTab().currentUrl)
+        assertEquals("youtube", restored.selectedTab().profileId)
+    }
+
+    @Test
+    fun `only one logical browser attachment is owned after repeated switches`() {
+        val attachment = BrowserViewAttachmentState()
+
+        assertNull(attachment.attach("tab-a"))
+        assertEquals("tab-a", attachment.attach("tab-b"))
+        assertEquals("tab-b", attachment.attach("tab-c"))
+        attachment.detach("tab-b")
+        assertEquals("tab-c", attachment.attachedTabId)
+        attachment.detach("tab-c")
+        assertNull(attachment.attachedTabId)
     }
 
     @Test

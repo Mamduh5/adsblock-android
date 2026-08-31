@@ -46,6 +46,26 @@ enum class AdaptiveResourceKind {
     FONT,
 }
 
+data class AdaptiveScope(
+    val profileId: String,
+    val siteScope: String? = null,
+) {
+    init {
+        require(profileId.isNotBlank())
+        require(siteScope == null || siteScope == siteScope.normalizedHost())
+    }
+
+    val diagnosticName: String
+        get() = if (siteScope == null) profileId else "$profileId@$siteScope"
+}
+
+fun adaptiveScope(profile: SiteProfile, topLevelUrl: String?): AdaptiveScope? =
+    if (profile.id == GenericWebProfile.profile.id) {
+        topLevelUrl?.hostFromUrl()?.let { AdaptiveScope(profile.id, it) }
+    } else {
+        AdaptiveScope(profile.id)
+    }
+
 data class AdaptivePolicy(
     val enabled: Boolean = false,
     val observeOffsiteNavigations: Boolean = false,
@@ -54,9 +74,12 @@ data class AdaptivePolicy(
     val protectedHosts: List<HostPattern> = emptyList(),
     val firstPartyLoaderPathPrefixes: List<String> = emptyList(),
 ) {
-    fun protects(host: String?, kind: AdaptiveResourceKind): Boolean =
+    fun protectsFromEnforcement(host: String?, kind: AdaptiveResourceKind): Boolean =
         kind in setOf(AdaptiveResourceKind.IMAGE, AdaptiveResourceKind.VIDEO, AdaptiveResourceKind.FONT) ||
             protectedHosts.any { it.matches(host) }
+
+    fun isFunctionalEvidence(host: String?, kind: AdaptiveResourceKind): Boolean =
+        protectsFromEnforcement(host, kind)
 }
 
 data class AdaptiveLearningConfig(
@@ -102,6 +125,7 @@ data class AdaptiveLearningConfig(
 
 sealed interface AdaptiveObservation {
     val profileId: String
+    val siteScope: String?
     val host: String
     val path: String?
     val pageType: PageType
@@ -116,6 +140,7 @@ data class AdaptiveNavigationObservation(
     val popup: Boolean,
     val blockedBySourcePolicy: Boolean,
     override val path: String? = null,
+    override val siteScope: String? = null,
 ) : AdaptiveObservation
 
 data class AdaptiveRequestObservation(
@@ -130,6 +155,7 @@ data class AdaptiveRequestObservation(
     val functionalEvidence: Boolean,
     val loaderPath: Boolean,
     val resourceKind: AdaptiveResourceKind,
+    override val siteScope: String? = null,
 ) : AdaptiveObservation
 
 data class AdaptiveDomObservation(
@@ -139,6 +165,7 @@ data class AdaptiveDomObservation(
     override val pageType: PageType,
     override val observedAtMs: Long,
     val fingerprint: String,
+    override val siteScope: String? = null,
 ) : AdaptiveObservation
 
 data class AdaptiveRecord(
@@ -162,6 +189,7 @@ data class AdaptiveRecord(
     val rejectedAtMs: Long?,
     val score: Int,
     val confidence: Int,
+    val siteScope: String? = null,
 )
 
 sealed interface AdaptiveDecision {
@@ -181,6 +209,7 @@ data class AdaptivePageHealth(
     val readerContainerPresent: Boolean = true,
     val chapterImageCount: Int = 1,
     val chapterNavigationPresent: Boolean = true,
+    val siteScope: String? = null,
 )
 
 data class AdaptiveStatusSummary(
@@ -204,7 +233,12 @@ class AdaptiveShieldEngine(
     private val recentEnforcements = linkedMapOf<String, Long>()
 
     init {
-        initialRecords.forEach { record -> records[record.id] = record }
+        initialRecords
+            .filter {
+                !(it.profileId == GenericWebProfile.profile.id && it.siteScope == null) &&
+                    it.id == adaptiveRuleId(it.scope(), it.type, it.host, it.path)
+            }
+            .forEach { record -> records[record.id] = record }
     }
 
     @Synchronized
@@ -214,11 +248,8 @@ class AdaptiveShieldEngine(
         mode: AdaptiveShieldMode,
     ): AdaptiveChange? {
         if (mode == AdaptiveShieldMode.OFF || !policy.enabled) return null
-        if (observation is AdaptiveRequestObservation && policy.protects(observation.host, observation.resourceKind)) {
-            return null
-        }
-
         maintain(observation.observedAtMs)
+        val scope = observation.scope()
         val type = observation.candidateType()
         val path = when (type) {
             AdaptiveCandidateType.FIRST_PARTY_LOADER -> observation.path
@@ -226,7 +257,7 @@ class AdaptiveShieldEngine(
                 (observation as AdaptiveDomObservation).fingerprint.safeDomFingerprint()
             else -> null
         }
-        val id = adaptiveRuleId(observation.profileId, type, observation.host, path)
+        val id = adaptiveRuleId(scope, type, observation.host, path)
         val previous = records[id]
         val revived = previous?.state == AdaptiveCandidateState.DORMANT
         val base = previous ?: AdaptiveRecord(
@@ -250,10 +281,19 @@ class AdaptiveShieldEngine(
             rejectedAtMs = null,
             score = 0,
             confidence = 0,
+            siteScope = observation.siteScope,
         )
         if (base.state == AdaptiveCandidateState.REJECTED) return null
 
-        val counted = base.withObservation(observation)
+        val evidenceObservation = if (
+            observation is AdaptiveRequestObservation &&
+            policy.isFunctionalEvidence(observation.host, observation.resourceKind)
+        ) {
+            observation.copy(functionalEvidence = true)
+        } else {
+            observation
+        }
+        val counted = base.withObservation(evidenceObservation)
         val score = score(counted)
         val confidence = confidence(score, autoThreshold(type))
         val candidate = counted.copy(
@@ -270,14 +310,14 @@ class AdaptiveShieldEngine(
             mode == AdaptiveShieldMode.AUTO_SAFE &&
             candidate.state != AdaptiveCandidateState.LEARNED &&
             eligibleForAuto(candidate, policy) &&
-            learnedCount(observation.profileId) < config.maxLearnedRulesPerProfile
+            learnedCount(scope) < config.maxLearnedRulesPerProfile
         ) {
             candidate.copy(state = AdaptiveCandidateState.LEARNED, learnedAtMs = observation.observedAtMs)
         } else {
             candidate
         }
         records[id] = promoted
-        trimProfile(observation.profileId)
+        trimScope(scope)
         return AdaptiveChange(previous, promoted)
     }
 
@@ -289,7 +329,7 @@ class AdaptiveShieldEngine(
             if (
                 record.state == AdaptiveCandidateState.CANDIDATE &&
                 eligibleForAuto(record, policyByProfile(record.profileId)) &&
-                learnedCount(record.profileId) < config.maxLearnedRulesPerProfile
+                learnedCount(record.scope()) < config.maxLearnedRulesPerProfile
             ) {
                 record.copy(state = AdaptiveCandidateState.LEARNED, learnedAtMs = nowMs)
             } else {
@@ -299,27 +339,32 @@ class AdaptiveShieldEngine(
     }
 
     @Synchronized
-    fun decide(
-        profile: SiteProfile,
+    fun decideRequest(
+        scope: AdaptiveScope,
+        policy: AdaptivePolicy,
         url: String,
-        pageType: PageType,
         resourceKind: AdaptiveResourceKind,
+        userInitiated: Boolean,
         blockerEnabled: Boolean,
         mode: AdaptiveShieldMode,
         nowMs: Long,
     ): AdaptiveDecision {
-        if (!blockerEnabled || mode != AdaptiveShieldMode.AUTO_SAFE || !profile.adaptivePolicy.enabled) {
+        if (!blockerEnabled || mode != AdaptiveShieldMode.AUTO_SAFE || !policy.enabled || userInitiated) {
             return AdaptiveDecision.Allow
         }
         val parsed = url.toUriOrNull() ?: return AdaptiveDecision.Allow
         val host = parsed.host.normalizedHost() ?: return AdaptiveDecision.Allow
-        if (profile.adaptivePolicy.protects(host, resourceKind)) return AdaptiveDecision.Allow
+        if (policy.protectsFromEnforcement(host, resourceKind)) return AdaptiveDecision.Allow
         maintain(nowMs)
         val path = sanitizeAdaptivePath(parsed.path)
         val match = records.values.firstOrNull { record ->
-                record.profileId == profile.id &&
+                record.scope() == scope &&
                 record.state == AdaptiveCandidateState.LEARNED &&
-                record.type in profile.adaptivePolicy.autoPromoteTypes &&
+                record.type in policy.autoPromoteTypes &&
+                record.type in setOf(
+                    AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
+                    AdaptiveCandidateType.FIRST_PARTY_LOADER,
+                ) &&
                 record.host == host &&
                 when (record.type) {
                     AdaptiveCandidateType.FIRST_PARTY_LOADER -> record.path == path
@@ -332,13 +377,64 @@ class AdaptiveShieldEngine(
     }
 
     @Synchronized
+    fun decideNavigation(
+        scope: AdaptiveScope,
+        policy: AdaptivePolicy,
+        targetUrl: String,
+        userInitiated: Boolean,
+        blockerEnabled: Boolean,
+        mode: AdaptiveShieldMode,
+        nowMs: Long,
+    ): AdaptiveDecision {
+        if (!blockerEnabled || mode != AdaptiveShieldMode.AUTO_SAFE || !policy.enabled || userInitiated) {
+            return AdaptiveDecision.Allow
+        }
+        val host = targetUrl.hostFromUrl() ?: return AdaptiveDecision.Allow
+        if (isAdaptiveAccountNavigation(targetUrl)) return AdaptiveDecision.Allow
+        if (policy.protectedHosts.any { it.matches(host) }) return AdaptiveDecision.Allow
+        maintain(nowMs)
+        val match = records.values.firstOrNull { record ->
+            record.scope() == scope &&
+                record.state == AdaptiveCandidateState.LEARNED &&
+                record.type == AdaptiveCandidateType.OFFSITE_REDIRECT_HOST &&
+                record.type in policy.autoPromoteTypes &&
+                record.host == host
+        } ?: return AdaptiveDecision.Allow
+        recentEnforcements[match.id] = nowMs
+        return AdaptiveDecision.Block(match.id, match.confidence, match.type)
+    }
+
+    /** Compatibility wrapper for specialized-profile request tests and callers. */
+    fun decide(
+        profile: SiteProfile,
+        url: String,
+        pageType: PageType,
+        resourceKind: AdaptiveResourceKind,
+        blockerEnabled: Boolean,
+        mode: AdaptiveShieldMode,
+        nowMs: Long,
+    ): AdaptiveDecision = decideRequest(
+        scope = AdaptiveScope(profile.id),
+        policy = profile.adaptivePolicy,
+        url = url,
+        resourceKind = resourceKind,
+        userInitiated = false,
+        blockerEnabled = blockerEnabled,
+        mode = mode,
+        nowMs = nowMs,
+    )
+
+    @Synchronized
     fun reportPageHealth(health: AdaptivePageHealth, nowMs: Long): List<AdaptiveRecord> {
         if (health.healthy) return emptyList()
         val rejected = mutableListOf<AdaptiveRecord>()
         recentEnforcements.entries.removeIf { (ruleId, enforcedAt) ->
             val record = records[ruleId]
             val withinWindow = nowMs - enforcedAt in 0..config.rollbackWindowMs
-            if (withinWindow && record?.profileId == health.profileId && record.state == AdaptiveCandidateState.LEARNED) {
+            if (
+                withinWindow && record?.scope() == AdaptiveScope(health.profileId, health.siteScope) &&
+                record.state == AdaptiveCandidateState.LEARNED
+            ) {
                 val updated = record.copy(
                     state = AdaptiveCandidateState.REJECTED,
                     rejectedAtMs = nowMs,
@@ -346,15 +442,15 @@ class AdaptiveShieldEngine(
                 records[ruleId] = updated
                 rejected += updated
             }
-            !withinWindow || record == null || record.profileId == health.profileId
+            !withinWindow || record == null || record.scope() == AdaptiveScope(health.profileId, health.siteScope)
         }
         return rejected
     }
 
     @Synchronized
-    fun hasRedirectEvidence(profileId: String, host: String): Boolean =
+    fun hasRedirectEvidence(scope: AdaptiveScope, host: String): Boolean =
         records.values.any {
-            it.profileId == profileId &&
+            it.scope() == scope &&
                 it.host == host.normalizedHost() &&
                 it.type == AdaptiveCandidateType.OFFSITE_REDIRECT_HOST &&
                 it.sourcePolicyBlockCount > 0
@@ -371,8 +467,8 @@ class AdaptiveShieldEngine(
     }
 
     @Synchronized
-    fun summary(profileId: String, nowMs: Long): AdaptiveStatusSummary {
-        val profileRecords = snapshot(nowMs).filter { it.profileId == profileId }
+    fun summary(scope: AdaptiveScope, nowMs: Long): AdaptiveStatusSummary {
+        val profileRecords = snapshot(nowMs).filter { it.scope() == scope }
         return AdaptiveStatusSummary(
             observed = profileRecords.count { it.state == AdaptiveCandidateState.OBSERVED },
             candidates = profileRecords.count { it.state == AdaptiveCandidateState.CANDIDATE },
@@ -383,21 +479,27 @@ class AdaptiveShieldEngine(
     }
 
     @Synchronized
-    fun forget(profileId: String, ruleId: String? = null) {
+    fun forget(scope: AdaptiveScope, ruleId: String? = null) {
         records.entries.removeIf { (_, record) ->
-            record.profileId == profileId && (ruleId == null || record.id == ruleId)
+            record.scope() == scope && (ruleId == null || record.id == ruleId)
         }
         recentEnforcements.keys.removeIf { it !in records }
     }
 
+    fun forget(profileId: String, ruleId: String? = null) =
+        forget(AdaptiveScope(profileId), ruleId)
+
     @Synchronized
-    fun disable(profileId: String, ruleId: String, nowMs: Long): AdaptiveRecord? {
-        val record = records[ruleId]?.takeIf { it.profileId == profileId } ?: return null
+    fun disable(scope: AdaptiveScope, ruleId: String, nowMs: Long): AdaptiveRecord? {
+        val record = records[ruleId]?.takeIf { it.scope() == scope } ?: return null
         val disabled = record.copy(state = AdaptiveCandidateState.REJECTED, rejectedAtMs = nowMs)
         records[ruleId] = disabled
         recentEnforcements.remove(ruleId)
         return disabled
     }
+
+    fun disable(profileId: String, ruleId: String, nowMs: Long): AdaptiveRecord? =
+        disable(AdaptiveScope(profileId), ruleId, nowMs)
 
     private fun maintain(nowMs: Long) {
         records.replaceAll { _, record ->
@@ -427,11 +529,16 @@ class AdaptiveShieldEngine(
             AdaptiveCandidateType.OFFSITE_REDIRECT_HOST ->
                 record.occurrenceCount >= config.redirectAutoMinimumOccurrences &&
                     record.score >= config.redirectAutoThreshold &&
-                    record.sourcePolicyBlockCount >= config.redirectAutoMinimumOccurrences
+                    (
+                        record.sourcePolicyBlockCount >= config.redirectAutoMinimumOccurrences ||
+                            record.popupCount >= config.redirectAutoMinimumOccurrences ||
+                            record.occurrenceCount >= config.redirectAutoMinimumOccurrences + 2
+                        )
             AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST ->
                 record.occurrenceCount >= config.thirdPartyAutoMinimumOccurrences &&
                     record.score >= config.thirdPartyAutoThreshold &&
-                    record.redirectCorrelationCount >= 2
+                    record.thirdPartyCount == record.occurrenceCount &&
+                    (record.staticBlockCount >= 3 || record.redirectCorrelationCount >= 2)
             AdaptiveCandidateType.FIRST_PARTY_LOADER ->
                 record.path != null &&
                     record.occurrenceCount >= config.loaderAutoMinimumOccurrences &&
@@ -470,11 +577,11 @@ class AdaptiveShieldEngine(
         AdaptiveCandidateType.DOM_STRUCTURE -> Int.MAX_VALUE
     }
 
-    private fun learnedCount(profileId: String): Int =
-        records.values.count { it.profileId == profileId && it.state == AdaptiveCandidateState.LEARNED }
+    private fun learnedCount(scope: AdaptiveScope): Int =
+        records.values.count { it.scope() == scope && it.state == AdaptiveCandidateState.LEARNED }
 
-    private fun trimProfile(profileId: String) {
-        val profileRecords = records.values.filter { it.profileId == profileId }
+    private fun trimScope(scope: AdaptiveScope) {
+        val profileRecords = records.values.filter { it.scope() == scope }
         val overflow = profileRecords.size - config.maxCandidatesPerProfile
         if (overflow <= 0) return
         profileRecords
@@ -516,8 +623,10 @@ object AdaptiveObservationFactory {
         observedAtMs: Long,
     ): AdaptiveNavigationObservation? {
         if (!profile.adaptivePolicy.enabled || !profile.adaptivePolicy.observeOffsiteNavigations) return null
+        val scope = adaptiveScope(profile, sourceUrl) ?: return null
         val sourceHost = sourceUrl?.hostFromUrl()
         val targetHost = targetUrl.hostFromUrl() ?: return null
+        if (isAdaptiveAccountNavigation(targetUrl)) return null
         if (sourceHost == targetHost || profile.allowedHosts.any { it.matches(targetHost) }) return null
         return AdaptiveNavigationObservation(
             profileId = profile.id,
@@ -526,6 +635,7 @@ object AdaptiveObservationFactory {
             observedAtMs = observedAtMs,
             popup = popup,
             blockedBySourcePolicy = blockedBySourcePolicy,
+            siteScope = scope.siteScope,
         )
     }
 
@@ -540,14 +650,14 @@ object AdaptiveObservationFactory {
         observedAtMs: Long,
     ): AdaptiveRequestObservation? {
         if (!profile.adaptivePolicy.enabled || !profile.adaptivePolicy.observeThirdPartyRequests) return null
+        val scope = adaptiveScope(profile, pageUrl) ?: return null
         val parsed = requestUrl.toUriOrNull() ?: return null
         val host = parsed.host.normalizedHost() ?: return null
         val path = sanitizeAdaptivePath(parsed.path)
-        val firstParty = profile.allowedHosts.any { it.matches(host) }
+        val firstParty = host == scope.siteScope || profile.allowedHosts.any { it.matches(host) }
         val loaderPath = firstParty && profile.adaptivePolicy.firstPartyLoaderPathPrefixes.any { prefix ->
             path.startsWith(prefix.normalizedPath().orEmpty())
         }
-        if (firstParty && !loaderPath) return null
         return AdaptiveRequestObservation(
             profileId = profile.id,
             host = host,
@@ -557,9 +667,10 @@ object AdaptiveObservationFactory {
             thirdParty = !firstParty,
             blockedByStaticRule = blockedByStaticRule,
             correlatedWithRedirect = correlatedWithRedirect,
-            functionalEvidence = functionalEvidence,
+            functionalEvidence = functionalEvidence || (firstParty && !loaderPath),
             loaderPath = loaderPath,
             resourceKind = resourceKind,
+            siteScope = scope.siteScope,
         )
     }
 }
@@ -576,6 +687,22 @@ fun sanitizeAdaptivePath(path: String?): String {
             }
         }
         .take(240)
+}
+
+fun safeUrlDiagnostic(url: String?): String {
+    val parsed = url?.toUriOrNull() ?: return "invalid"
+    return "scheme=${parsed.scheme ?: "none"}, host=${parsed.host.normalizedHost() ?: "none"}, " +
+        "path=${sanitizeAdaptivePath(parsed.path)}"
+}
+
+fun isAdaptiveAccountNavigation(url: String): Boolean {
+    val pathSegments = url.toUriOrNull()?.path
+        ?.lowercase(Locale.US)
+        ?.split('/')
+        .orEmpty()
+    return pathSegments.any {
+        it in setOf("auth", "authorize", "oauth", "login", "signin", "session", "account", "sso")
+    }
 }
 
 fun adaptiveResourceKind(url: String, headers: Map<String, String>): AdaptiveResourceKind {
@@ -610,12 +737,19 @@ private fun AdaptiveCandidateType.riskTier(): AdaptiveRiskTier = when (this) {
     AdaptiveCandidateType.DOM_STRUCTURE -> AdaptiveRiskTier.HIGH_RISK
 }
 
+private fun AdaptiveObservation.scope(): AdaptiveScope = AdaptiveScope(profileId, siteScope)
+
+fun AdaptiveRecord.scope(): AdaptiveScope = AdaptiveScope(profileId, siteScope)
+
 private fun adaptiveRuleId(
-    profileId: String,
+    scope: AdaptiveScope,
     type: AdaptiveCandidateType,
     host: String,
     path: String?,
-): String = "adaptive:$profileId:${type.name.lowercase(Locale.US)}:$host:${path ?: "host"}"
+): String {
+    val scopePart = scope.siteScope?.let { ":site=$it" }.orEmpty()
+    return "adaptive:${scope.profileId}$scopePart:${type.name.lowercase(Locale.US)}:$host:${path ?: "host"}"
+}
 
 private fun String.safeDomFingerprint(): String =
     lowercase(Locale.US)

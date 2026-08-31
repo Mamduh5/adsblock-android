@@ -37,7 +37,8 @@ class AdaptivePolicyTest {
             assertTrue(profile.adaptivePolicy.enabled)
             assertTrue(profile.adaptivePolicy.autoPromoteTypes.isEmpty())
         }
-        assertFalse(GenericWebProfile.profile.adaptivePolicy.enabled)
+        assertTrue(GenericWebProfile.profile.adaptivePolicy.enabled)
+        assertTrue(GenericWebProfile.profile.adaptivePolicy.observeThirdPartyRequests)
     }
 
     @Test

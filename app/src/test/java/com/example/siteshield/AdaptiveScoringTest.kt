@@ -53,17 +53,16 @@ class AdaptiveScoringTest {
     }
 
     @Test
-    fun `generic web external navigation produces no hostile observation`() {
-        assertNull(
-            AdaptiveObservationFactory.navigation(
+    fun `generic web external navigation is scoped to its source site`() {
+        val observation = AdaptiveObservationFactory.navigation(
                 profile = GenericWebProfile.profile,
                 sourceUrl = "https://search.example/results",
                 targetUrl = "https://normal.example/article",
                 popup = false,
                 blockedBySourcePolicy = false,
                 observedAtMs = 1,
-            ),
-        )
+            )
+        assertEquals("search.example", observation?.siteScope)
     }
 
     @Test
@@ -103,8 +102,7 @@ class AdaptiveScoringTest {
         assertEquals(AdaptiveCandidateState.LEARNED, promoted?.current?.state)
         assertEquals("/js/ads/new-loader-1234567890abcdef.js", promoted?.current?.path)
 
-        assertNull(
-            AdaptiveObservationFactory.request(
+        val functional = AdaptiveObservationFactory.request(
                 profile = profile,
                 pageUrl = sourceUrl,
                 requestUrl = "https://www.mangakakalot.gg/js/app.js",
@@ -113,8 +111,9 @@ class AdaptiveScoringTest {
                 functionalEvidence = false,
                 resourceKind = AdaptiveResourceKind.OTHER,
                 observedAtMs = 7,
-            ),
-        )
+            )
+        assertNotNull(functional)
+        assertEquals(true, functional?.functionalEvidence)
     }
 
     @Test
@@ -143,9 +142,9 @@ class AdaptiveScoringTest {
     }
 
     @Test
-    fun `third party host requires redirect correlation before auto promotion`() {
+    fun `third party host can promote without redirect correlation when static evidence repeats`() {
         val engine = AdaptiveShieldEngine()
-        repeat(20) { index ->
+        repeat(5) { index ->
             engine.observe(
                 AdaptiveRequestObservation(
                     profileId = profile.id,
@@ -154,7 +153,7 @@ class AdaptiveScoringTest {
                     pageType = PageType.CHAPTER_READER,
                     observedAtMs = index + 1L,
                     thirdParty = true,
-                    blockedByStaticRule = false,
+                    blockedByStaticRule = true,
                     correlatedWithRedirect = false,
                     functionalEvidence = false,
                     loaderPath = false,
@@ -164,7 +163,7 @@ class AdaptiveScoringTest {
                 AdaptiveShieldMode.AUTO_SAFE,
             )
         }
-        assertEquals(AdaptiveCandidateState.CANDIDATE, engine.snapshot(30).single().state)
+        assertEquals(AdaptiveCandidateState.LEARNED, engine.snapshot(30).single().state)
 
         repeat(5) { index ->
             engine.observe(

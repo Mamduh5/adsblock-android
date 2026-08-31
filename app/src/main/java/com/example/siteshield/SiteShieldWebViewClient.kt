@@ -115,22 +115,30 @@ class SiteShieldWebViewClient(
                 false
             }
             BlockDecision.Allow -> {
-                if (!settingsStore.blockerEnabled) {
-                    val sourcePolicyDecision = blockerEngine.navigationDecision(
-                        profile = sourceContext.profile,
-                        url = targetUrl,
-                        currentPageUrl = sourceContext.url,
-                        isMainFrame = true,
+                adaptiveShieldController.observeNavigation(
+                    profile = sourceContext.profile,
+                    sourceUrl = sourceContext.url,
+                    targetUrl = targetUrl,
+                    popup = true,
+                    blockedBySourcePolicy = false,
+                )
+                val adaptiveDecision = adaptiveShieldController.decideNavigation(
+                    profile = sourceContext.profile,
+                    sourceUrl = sourceContext.url,
+                    targetUrl = targetUrl,
+                    userInitiated = false,
+                    blockerEnabled = settingsStore.blockerEnabled,
+                )
+                if (adaptiveDecision is AdaptiveDecision.Block) {
+                    onEvent(
+                        DebugEvent(
+                            category = DebugEventCategory.ADAPTIVE_BLOCK,
+                            message = "[${sourceContext.profile.displayName}] Adaptive rule blocked new-window navigation",
+                            detail = "$diagnostic, ruleId=${adaptiveDecision.ruleId}, " +
+                                "confidence=${adaptiveDecision.confidence}, type=${adaptiveDecision.type}",
+                        ),
                     )
-                    if (sourcePolicyDecision is BlockDecision.Block) {
-                        adaptiveShieldController.observeNavigation(
-                            profile = sourceContext.profile,
-                            sourceUrl = sourceContext.url,
-                            targetUrl = targetUrl,
-                            popup = true,
-                            blockedBySourcePolicy = false,
-                        )
-                    }
+                    return false
                 }
                 onEvent(
                     DebugEvent(
@@ -155,11 +163,13 @@ class SiteShieldWebViewClient(
         )
 
         val currentPageUrl = activeContext.url
+        val adaptiveProfile = activeContext.profile
         val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)
+        val userInitiated = request.hasGesture()
         if (!settingsStore.blockerEnabled) {
-            if (request.isForMainFrame && decision is BlockDecision.Block) {
+            if (request.isForMainFrame && !userInitiated) {
                 adaptiveShieldController.observeNavigation(
-                    profile = profile,
+                    profile = adaptiveProfile,
                     sourceUrl = currentPageUrl,
                     targetUrl = url,
                     popup = false,
@@ -171,9 +181,9 @@ class SiteShieldWebViewClient(
 
         when (decision) {
             is BlockDecision.Block -> {
-                if (request.isForMainFrame) {
+                if (request.isForMainFrame && !userInitiated) {
                     adaptiveShieldController.observeNavigation(
-                        profile = profile,
+                        profile = adaptiveProfile,
                         sourceUrl = currentPageUrl,
                         targetUrl = url,
                         popup = false,
@@ -198,8 +208,37 @@ class SiteShieldWebViewClient(
                 promptExternalOpen(uri)
                 return true
             }
-            BlockDecision.Allow -> return false
+            BlockDecision.Allow -> Unit
         }
+
+        if (request.isForMainFrame && !userInitiated) {
+            adaptiveShieldController.observeNavigation(
+                profile = adaptiveProfile,
+                sourceUrl = currentPageUrl,
+                targetUrl = url,
+                popup = false,
+                blockedBySourcePolicy = false,
+            )
+            val adaptiveDecision = adaptiveShieldController.decideNavigation(
+                profile = adaptiveProfile,
+                sourceUrl = currentPageUrl,
+                targetUrl = url,
+                userInitiated = false,
+                blockerEnabled = true,
+            )
+            if (adaptiveDecision is AdaptiveDecision.Block) {
+                onEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.ADAPTIVE_BLOCK,
+                        message = "[${profile.displayName}] Adaptive rule blocked page-driven navigation",
+                        detail = "ruleId=${adaptiveDecision.ruleId}, confidence=${adaptiveDecision.confidence}, " +
+                            "type=${adaptiveDecision.type}, targetScheme=${uri.scheme}, targetHost=${uri.host}",
+                    ),
+                )
+                return true
+            }
+        }
+        return false
     }
 
     override fun shouldInterceptRequest(
@@ -269,6 +308,7 @@ class SiteShieldWebViewClient(
             requestUrl = requestUrl,
             resourceKind = resourceKind,
             blockerEnabled = blockerEnabled,
+            userInitiated = request.hasGesture(),
         )
         if (adaptiveDecision !is AdaptiveDecision.Block) return null
 
@@ -303,8 +343,8 @@ class SiteShieldWebViewClient(
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
-                message = "[${profile.displayName}] Loading ${url.orEmpty()}",
-                detail = "detected=$pageType",
+                message = "[${profile.displayName}] Loading page",
+                detail = "detected=$pageType, ${safeUrlDiagnostic(url)}",
             ),
         )
         onEvent(
@@ -348,8 +388,8 @@ class SiteShieldWebViewClient(
         onEvent(
             DebugEvent(
                 category = DebugEventCategory.PAGE_TYPE,
-                message = "[${updatedContext.profile.displayName}] History updated ${url.orEmpty()}",
-                detail = "detected=$pageType, reload=$isReload",
+                message = "[${updatedContext.profile.displayName}] History updated",
+                detail = "detected=$pageType, reload=$isReload, ${safeUrlDiagnostic(url)}",
             ),
         )
         onEvent(

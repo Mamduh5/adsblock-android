@@ -43,11 +43,11 @@ class AdaptiveExpiryRollbackTest {
     fun `catastrophic health failure rejects only recently enforced adaptive rule`() {
         val engine = AdaptiveShieldEngine()
         repeat(3) { index -> engine.observe(popup(index + 1L), policy, AdaptiveShieldMode.AUTO_SAFE) }
-        engine.decide(
-            profile,
+        engine.decideNavigation(
+            AdaptiveScope(profile.id),
+            profile.adaptivePolicy,
             "https://rotating-ad.example/payload.js",
-            PageType.CHAPTER_READER,
-            AdaptiveResourceKind.OTHER,
+            userInitiated = false,
             blockerEnabled = true,
             mode = AdaptiveShieldMode.AUTO_SAFE,
             nowMs = 10,
@@ -69,11 +69,11 @@ class AdaptiveExpiryRollbackTest {
         assertEquals(AdaptiveCandidateState.REJECTED, engine.snapshot(11).single().state)
         assertEquals(
             AdaptiveDecision.Allow,
-            engine.decide(
-                profile,
+            engine.decideNavigation(
+                AdaptiveScope(profile.id),
+                profile.adaptivePolicy,
                 "https://rotating-ad.example/payload.js",
-                PageType.CHAPTER_READER,
-                AdaptiveResourceKind.OTHER,
+                userInitiated = false,
                 blockerEnabled = true,
                 mode = AdaptiveShieldMode.AUTO_SAFE,
                 nowMs = 12,

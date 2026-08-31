@@ -12,6 +12,22 @@ object BrowserTabConfig {
     const val SCROLL_RESTORE_DELAY_MS = 350L
 }
 
+/** Pure attachment ownership used by MainActivity to keep exactly one browser view visible. */
+class BrowserViewAttachmentState {
+    var attachedTabId: String? = null
+        private set
+
+    fun attach(tabId: String): String? {
+        val previouslyAttached = attachedTabId
+        attachedTabId = tabId
+        return previouslyAttached
+    }
+
+    fun detach(tabId: String) {
+        if (attachedTabId == tabId) attachedTabId = null
+    }
+}
+
 data class BrowserTabState(
     val id: String,
     val currentUrl: String?,
@@ -192,22 +208,24 @@ class BrowserTabManager(
 }
 
 object BrowserSessionUrlSanitizer {
-    /** Keeps only the HTTPS origin and path; query/fragment/user-info can contain secrets or user input. */
+    /**
+     * Session URLs stay only in local app storage. Preserve query and fragment because they can be
+     * part of page identity, while rejecting non-HTTPS schemes and stripping user-info credentials.
+     */
     fun sanitize(url: String?): String? {
         if (url.isNullOrBlank()) return null
         return runCatching {
             val parsed = java.net.URI(url)
             require(parsed.scheme.equals("https", ignoreCase = true))
             val host = parsed.host?.takeIf(String::isNotBlank) ?: error("missing host")
-            java.net.URI(
-                "https",
-                null,
-                host,
-                parsed.port,
-                parsed.path?.takeIf(String::isNotBlank) ?: "/",
-                null,
-                null,
-            ).toASCIIString()
+            val authorityHost = if (':' in host) "[$host]" else host
+            buildString {
+                append("https://").append(authorityHost)
+                if (parsed.port >= 0) append(':').append(parsed.port)
+                append(parsed.rawPath?.takeIf(String::isNotBlank) ?: "/")
+                parsed.rawQuery?.let { append('?').append(it) }
+                parsed.rawFragment?.let { append('#').append(it) }
+            }.also { sanitized -> java.net.URI(sanitized) }
         }.getOrNull()
     }
 }

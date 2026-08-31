@@ -19,11 +19,11 @@ class AdaptiveRuleEngineTest {
                 confidence = 100,
                 type = AdaptiveCandidateType.OFFSITE_REDIRECT_HOST,
             ),
-            engine.decide(
-                profile,
+            engine.decideNavigation(
+                AdaptiveScope(profile.id),
+                profile.adaptivePolicy,
                 target,
-                PageType.CHAPTER_READER,
-                AdaptiveResourceKind.OTHER,
+                userInitiated = false,
                 blockerEnabled = true,
                 mode = AdaptiveShieldMode.AUTO_SAFE,
                 nowMs = 10,
@@ -31,11 +31,11 @@ class AdaptiveRuleEngineTest {
         )
         assertEquals(
             AdaptiveDecision.Allow,
-            engine.decide(
-                GenericWebProfile.profile,
+            engine.decideNavigation(
+                AdaptiveScope(GenericWebProfile.profile.id, "example.com"),
+                GenericWebProfile.profile.adaptivePolicy,
                 target,
-                PageType.UNKNOWN,
-                AdaptiveResourceKind.OTHER,
+                userInitiated = false,
                 blockerEnabled = true,
                 mode = AdaptiveShieldMode.AUTO_SAFE,
                 nowMs = 10,
@@ -43,11 +43,11 @@ class AdaptiveRuleEngineTest {
         )
         assertEquals(
             AdaptiveDecision.Allow,
-            engine.decide(
-                profile,
+            engine.decideNavigation(
+                AdaptiveScope(profile.id),
+                profile.adaptivePolicy,
                 target,
-                PageType.CHAPTER_READER,
-                AdaptiveResourceKind.OTHER,
+                userInitiated = false,
                 blockerEnabled = false,
                 mode = AdaptiveShieldMode.AUTO_SAFE,
                 nowMs = 10,
@@ -61,11 +61,11 @@ class AdaptiveRuleEngineTest {
 
         assertEquals(
             AdaptiveDecision.Allow,
-            engine.decide(
-                profile,
+            engine.decideNavigation(
+                AdaptiveScope(profile.id),
+                profile.adaptivePolicy,
                 "https://rotating-ad.example/payload.js",
-                PageType.CHAPTER_READER,
-                AdaptiveResourceKind.OTHER,
+                userInitiated = false,
                 blockerEnabled = true,
                 mode = AdaptiveShieldMode.LEARN,
                 nowMs = 10,
@@ -98,17 +98,17 @@ class AdaptiveRuleEngineTest {
             thirdParty = true,
             blockedByStaticRule = true,
             correlatedWithRedirect = true,
-            functionalEvidence = false,
+            functionalEvidence = true,
             loaderPath = false,
             resourceKind = AdaptiveResourceKind.VIDEO,
         )
-        assertNull(
-            AdaptiveShieldEngine().observe(
+        val observed = AdaptiveShieldEngine().observe(
                 youtubeObservation,
                 YouTubeProfile.profile.adaptivePolicy,
                 AdaptiveShieldMode.AUTO_SAFE,
-            ),
-        )
+            )
+        assertEquals(AdaptiveCandidateState.OBSERVED, observed?.current?.state)
+        assertEquals(1, observed?.current?.functionalEvidenceCount)
     }
 
     @Test

@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private lateinit var sessionRepository: BrowserSessionRepository
     private lateinit var tabManager: BrowserTabManager
     private val tabRuntimes = linkedMapOf<String, TabRuntime>()
+    private val browserAttachment = BrowserViewAttachmentState()
     private val pendingScrollRestores = mutableMapOf<String, Int>()
     private val persistenceHandler = Handler(Looper.getMainLooper())
     private val persistSessionRunnable = Runnable { persistSessionNow() }
@@ -102,6 +103,8 @@ class MainActivity : Activity() {
         activateRuntime(initialRuntime)
         val root = buildUi()
         setContentView(root)
+        attachSelectedRuntime(initialRuntime)
+        synchronizeSelectedRuntime(initialRuntime, tabManager.selectedTab())
         recordEvent(
             DebugEvent(
                 category = DebugEventCategory.PROFILE,
@@ -657,24 +660,60 @@ class MainActivity : Activity() {
         activeProfile = runtime.client.topLevelContextSnapshot().profile
     }
 
+    private fun detachRuntimeView(runtime: TabRuntime) {
+        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
+        browserAttachment.detach(runtime.tabId)
+    }
+
+    private fun attachSelectedRuntime(runtime: TabRuntime) {
+        // Defensive iteration also repairs any attachment left by an older selection path.
+        tabRuntimes.values
+            .filter { it.tabId != runtime.tabId && it.webView.parent === contentLayer }
+            .forEach(::detachRuntimeView)
+        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
+        contentLayer.addView(runtime.webView, 0)
+        browserAttachment.attach(runtime.tabId)
+    }
+
+    private fun synchronizeSelectedRuntime(runtime: TabRuntime, selected: BrowserTabState) {
+        activateRuntime(runtime)
+        val profile = runtime.client.topLevelContextSnapshot().profile
+        activeProfile = profile
+        settingsStore.selectedProfileId = profile.id
+        dataUsageTracker.switchProfile(profile.id)
+        WebViewConfigurator.applyCookiePolicy(runtime.webView, profile)
+        WebViewConfigurator.applyDataSaverPolicy(
+            runtime.webView,
+            dataSaverModeStore.snapshot(),
+            profile,
+            blockerEngine.classifyPageType(profile, selected.currentUrl ?: profile.startUrl),
+        )
+        if (::profileButton.isInitialized) profileButton.text = "Profile: ${profile.displayName}"
+        if (::browseHome.isInitialized) {
+            browseHome.visibility = if (selected.currentUrl == null) View.VISIBLE else View.GONE
+        }
+        updateHeader(selected.title ?: runtime.webView.title)
+        updateDataUsageReadout()
+        updateRuntimeMarkers()
+    }
+
     private fun selectTab(tabId: String, checkpointCurrent: Boolean = true) {
+        if (tabManager.tab(tabId) == null) return
         if (checkpointCurrent) checkpointActiveScroll()
-        tabRuntimes[tabManager.selectedTabId]?.webView?.onPause()
+        tabRuntimes[tabManager.selectedTabId]?.let { outgoing ->
+            outgoing.webView.onPause()
+            detachRuntimeView(outgoing)
+        }
         val selected = tabManager.select(tabId) ?: return
         val wasSuspended = tabRuntimes[tabId] == null
         val runtime = tabRuntimes[tabId] ?: createTabRuntime(selected)
-        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
-        if (::contentLayer.isInitialized) contentLayer.addView(runtime.webView, 0)
-        activateRuntime(runtime)
+        attachSelectedRuntime(runtime)
+        synchronizeSelectedRuntime(runtime, selected)
         runtime.webView.onResume()
-        settingsStore.selectedProfileId = activeProfile.id
-        dataUsageTracker.switchProfile(activeProfile.id)
-        browseHome.visibility = if (selected.currentUrl == null) View.VISIBLE else View.GONE
         if (wasSuspended && selected.currentUrl != null) {
             runtime.client.prepareExplicitNavigation(selected.currentUrl)
             runtime.webView.loadUrl(selected.currentUrl)
         }
-        updateHeader(selected.title)
         updateTabsButton()
         suspendExcessRuntimes()
         scheduleSessionPersistence()
@@ -703,7 +742,7 @@ class MainActivity : Activity() {
         tabManager.markSuspended(runtime.tabId)
         runtime.downloadIntentTracker.clear()
         pendingScrollRestores.remove(runtime.tabId)
-        (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
+        detachRuntimeView(runtime)
         runtime.webView.stopLoading()
         runtime.webView.setDownloadListener(null)
         runtime.webView.webChromeClient = null
@@ -716,7 +755,11 @@ class MainActivity : Activity() {
         destroyRuntime(runtime)
         scheduleSessionPersistence()
         if (tabId == tabManager.selectedTabId) {
-            persistenceHandler.post { selectTab(tabId, checkpointCurrent = false) }
+            persistenceHandler.post {
+                if (tabManager.selectedTabId == tabId && tabRuntimes[tabId] == null) {
+                    selectTab(tabId, checkpointCurrent = false)
+                }
+            }
         }
     }
 
@@ -993,14 +1036,19 @@ class MainActivity : Activity() {
 
     private fun showAdaptiveShieldDialog() {
         val profile = activeProfile
-        val summary = adaptiveShieldController.summary(profile.id)
-        val records = adaptiveShieldController.records(profile.id)
+        val scope = adaptiveScope(profile, webViewClient.topLevelContextSnapshot().url)
+        if (scope == null) {
+            Toast.makeText(this, "Open a website to view its adaptive scope", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val summary = adaptiveShieldController.summary(scope)
+        val records = adaptiveShieldController.records(scope)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(8), dp(18), dp(8))
         }
         content.addView(TextView(this).apply {
-            text = "${profile.displayName}\n" +
+            text = "${profile.displayName} · Scope: ${scope.siteScope ?: "profile"}\n" +
                 "Observed: ${summary.observed}  Candidates: ${summary.candidates}\n" +
                 "Learned active: ${summary.learnedActive}  Dormant: ${summary.dormant}  " +
                 "Rejected: ${summary.rejected}"
@@ -1018,7 +1066,7 @@ class MainActivity : Activity() {
         } else {
             records.forEach { record ->
                 content.addView(largeButton(adaptiveRuleLabel(record)) {
-                    showAdaptiveRuleActions(profile, record)
+                    showAdaptiveRuleActions(scope, record)
                 })
             }
         }
@@ -1036,7 +1084,7 @@ class MainActivity : Activity() {
                     .setMessage("Remove candidates, learned rules, and observations for ${profile.displayName}? Cookies and site data are not affected.")
                     .setNegativeButton("Cancel", null)
                     .setPositiveButton("Forget") { _, _ ->
-                        adaptiveShieldController.forget(profile.id)
+                        adaptiveShieldController.forget(scope)
                         dialog.dismiss()
                         Toast.makeText(this, "Adaptive data forgotten", Toast.LENGTH_SHORT).show()
                     }
@@ -1046,7 +1094,7 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
-    private fun showAdaptiveRuleActions(profile: SiteProfile, record: AdaptiveRecord) {
+    private fun showAdaptiveRuleActions(scope: AdaptiveScope, record: AdaptiveRecord) {
         val actions = buildList {
             if (record.state == AdaptiveCandidateState.LEARNED || record.state == AdaptiveCandidateState.DORMANT) {
                 add("Disable learned rule")
@@ -1056,13 +1104,16 @@ class MainActivity : Activity() {
         android.app.AlertDialog.Builder(this)
             .setTitle(record.host)
             .setMessage(
-                "Type: ${record.type}\nState: ${record.state}\nSeen: ${record.occurrenceCount}\n" +
-                    "Confidence: ${record.confidence}\nPath: ${record.path ?: "host only"}",
+                "Scope: ${record.scope().diagnosticName}\nType: ${record.type}\nState: ${record.state}\n" +
+                    "Seen: ${record.occurrenceCount}  Confidence: ${record.confidence}\n" +
+                    "Static: ${record.staticBlockCount}  Third-party: ${record.thirdPartyCount}\n" +
+                    "Redirect: ${record.redirectCorrelationCount}  Functional: ${record.functionalEvidenceCount}\n" +
+                    "Path: ${record.path ?: "host only"}\nRule: ${record.id}",
             )
             .setItems(actions.toTypedArray()) { _, index ->
                 when (actions[index]) {
-                    "Disable learned rule" -> adaptiveShieldController.disable(profile.id, record.id)
-                    else -> adaptiveShieldController.forget(profile.id, record.id)
+                    "Disable learned rule" -> adaptiveShieldController.disable(scope, record.id)
+                    else -> adaptiveShieldController.forget(scope, record.id)
                 }
                 Toast.makeText(this, "Adaptive rule updated", Toast.LENGTH_SHORT).show()
             }
@@ -1110,6 +1161,7 @@ class MainActivity : Activity() {
                     readerContainerPresent = readerPresent,
                     chapterImageCount = imageCount,
                     chapterNavigationPresent = navigationPresent,
+                    siteScope = adaptiveScope(profile, pageUrl)?.siteScope,
                 ),
             )
         }
@@ -1356,7 +1408,7 @@ class MainActivity : Activity() {
             DebugEvent(
                 category = DebugEventCategory.DOM_CLEANUP,
                 message = "[${profile.displayName}] Reader cleanup requested",
-                detail = "pageType=$pageType, url=$pageUrl",
+                detail = "pageType=$pageType, ${safeUrlDiagnostic(pageUrl)}",
             ),
         )
         val script = buildString {
@@ -1403,10 +1455,8 @@ class MainActivity : Activity() {
     }
 
     private fun setActiveProfile(profile: SiteProfile) {
-        if (::activeProfile.isInitialized && activeProfile.id == profile.id) return
         dataUsageTracker.switchProfile(profile.id)
         activeProfile = profile
-        tabManager.updateNavigation(tabManager.selectedTabId, webView.url, profile.id)
         settingsStore.selectedProfileId = profile.id
         WebViewConfigurator.applyCookiePolicy(webView, profile)
         applyDataSaverPolicy(profile, webView.url ?: profile.startUrl)
@@ -1475,6 +1525,7 @@ class MainActivity : Activity() {
         }
         markerText.text = "Profile=${activeProfile.id} PageType=$pageType DataSaver=${dataSaverModeStore.snapshot().name} " +
             "Adaptive=${adaptiveShieldController.mode().name} " +
+            "AdaptiveScope=${adaptiveScope(activeProfile, pageUrl)?.diagnosticName ?: "none"} " +
             "OffsiteStrict=${policy.blockOffsiteMainFrameNavigations} " +
             "OffsiteNavDenied=$navDenied ReaderCleanupRan=$cleanupRan StorageCleanupRan=$storageRan"
     }
