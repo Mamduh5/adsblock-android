@@ -15,19 +15,45 @@ interface AdaptiveStatePersistence {
     fun save(records: List<AdaptiveRecord>)
 }
 
-class SharedPreferencesAdaptiveStatePersistence(context: Context) : AdaptiveStatePersistence {
+internal interface AdaptivePreferenceStore {
+    fun getString(key: String): String?
+    fun putString(key: String, value: String): Boolean
+    fun remove(key: String): Boolean
+}
+
+private class AndroidAdaptivePreferenceStore(context: Context) : AdaptivePreferenceStore {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
-    override fun load(): List<AdaptiveRecord> =
-        AdaptiveStateCodec.decode(preferences.getString(KEY_STATE, null))
+    override fun getString(key: String): String? = preferences.getString(key, null)
 
-    override fun save(records: List<AdaptiveRecord>) {
-        preferences.edit().putString(KEY_STATE, AdaptiveStateCodec.encode(records)).apply()
-    }
+    override fun putString(key: String, value: String): Boolean = preferences.edit().putString(key, value).commit()
+
+    override fun remove(key: String): Boolean = preferences.edit().remove(key).commit()
 
     private companion object {
         const val PREFERENCES_NAME = "site_shield_adaptive"
-        const val KEY_STATE = "adaptive_state_v2"
+    }
+}
+
+class SharedPreferencesAdaptiveStatePersistence private constructor(
+    private val preferences: AdaptivePreferenceStore,
+) : AdaptiveStatePersistence {
+    constructor(context: Context) : this(AndroidAdaptivePreferenceStore(context))
+
+    internal constructor(preferences: AdaptivePreferenceStore, testOnly: Unit = Unit) : this(preferences)
+
+    override fun load(): List<AdaptiveRecord> =
+        AdaptiveStateCodec.decode(preferences.getString(KEY_STATE_V3) ?: preferences.getString(KEY_STATE_LEGACY))
+
+    override fun save(records: List<AdaptiveRecord>) {
+        if (preferences.putString(KEY_STATE_V3, AdaptiveStateCodec.encode(records))) {
+            preferences.remove(KEY_STATE_LEGACY)
+        }
+    }
+
+    internal companion object {
+        const val KEY_STATE_V3 = "adaptive_state_v3"
+        const val KEY_STATE_LEGACY = "adaptive_state_v2"
     }
 }
 
@@ -225,6 +251,7 @@ class AdaptiveShieldController(
         blockedByStaticRule: Boolean,
         resourceKind: AdaptiveResourceKind,
     ) {
+        if (mode.get() == AdaptiveShieldMode.OFF || !profile.adaptivePolicy.enabled) return
         val scope = adaptiveScope(profile, pageUrl) ?: return
         val host = requestUrl.hostFromUrl() ?: return
         val nowMs = clock.nowMs()
@@ -259,17 +286,17 @@ class AdaptiveShieldController(
         val scope = adaptiveScope(profile, pageUrl) ?: return
         val nowMs = clock.nowMs()
         val batch = reports.take(MAX_DOM_REPORTS_PER_BATCH)
-        val hasReportedLoader = batch.any { it.role == AdaptiveAdResourceRole.LOADER }
-        val hasCorrelatedAdFrame = batch.any { report ->
-            report.role == AdaptiveAdResourceRole.IFRAME && synchronized(recentRequests) {
-                recentRequests.any {
-                    nowMs - it.observedAtMs <= DOM_CORRELATION_WINDOW_MS &&
-                        it.scope == scope && it.host == report.host && it.path == report.path
-                }
-            }
-        }
-        batch.forEach { report ->
-            if (report.role == AdaptiveAdResourceRole.STRUCTURE) {
+        val directLoaderKeys = batch.filter { it.role == AdaptiveAdResourceRole.LOADER }
+            .map { "${it.host}${it.path}" }
+            .toSet()
+        batch.groupBy(AdaptiveDomAdReport::slotId).forEach slotGroup@{ (slotId, slotReports) ->
+            val structureReports = slotReports.filter { it.role == AdaptiveAdResourceRole.STRUCTURE }
+            val loaderReports = slotReports.filter { it.role == AdaptiveAdResourceRole.LOADER }
+            val correlatedFrames = slotReports.filter { it.role == AdaptiveAdResourceRole.IFRAME }
+                .mapNotNull { report -> recentRequestFor(scope, report, nowMs)?.let { report to it } }
+
+            structureReports.forEach { report ->
+                onEvent(adaptiveSlotEvent(slotId, "structure"))
                 record(
                     AdaptiveAdObservation(
                         profileId = profile.id,
@@ -284,40 +311,83 @@ class AdaptiveShieldController(
                     ),
                     profile.adaptivePolicy,
                 )
-                if (!hasReportedLoader && hasCorrelatedAdFrame) {
-                    inferSingleRecentLoader(scope, profile, report, nowMs)?.let { inferred ->
-                        record(inferred, profile.adaptivePolicy)
-                    }
-                }
-                return@forEach
             }
-            val recent = synchronized(recentRequests) {
-                recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
-                recentRequests.lastOrNull {
-                    it.scope == scope && it.host == report.host && it.path == report.path
+
+            correlatedFrames.forEach { (report, recent) ->
+                onEvent(adaptiveSlotEvent(slotId, "iframe-correlated"))
+                recordCorrelatedReport(profile, pageUrl, scope, report, recent, nowMs)
+            }
+            loaderReports.forEach loader@{ report ->
+                val recent = recentRequestFor(scope, report, nowMs) ?: return@loader
+                onEvent(adaptiveSlotEvent(slotId, "direct-loader"))
+                recordCorrelatedReport(profile, pageUrl, scope, report, recent, nowMs)
+            }
+
+            if (loaderReports.isEmpty() && correlatedFrames.isNotEmpty()) {
+                when (val inference = inferSingleRecentLoader(
+                    scope,
+                    profile,
+                    structureReports.lastOrNull() ?: return@slotGroup,
+                    nowMs,
+                    directLoaderKeys,
+                )) {
+                    is LoaderInference.Inferred -> {
+                        onEvent(adaptiveSlotEvent(slotId, "inferred-loader"))
+                        record(inference.observation, profile.adaptivePolicy)
+                    }
+                    is LoaderInference.Ambiguous -> onEvent(
+                        adaptiveSlotEvent(slotId, "loader-ambiguous candidates=${inference.candidateCount}"),
+                    )
+                    LoaderInference.None -> Unit
                 }
-            } ?: return@forEach
-            val functionalConflict = profile.adaptivePolicy.protectedHosts.any { it.matches(report.host) } ||
-                isAdaptiveAccountNavigation("https://${report.host}${report.path}")
-            record(
-                AdaptiveAdObservation(
-                    profileId = profile.id,
-                    host = report.host,
-                    path = report.path,
-                    pageType = profile.pageTypeForAdaptive(pageUrl),
-                    observedAtMs = nowMs,
-                    evidence = report.evidence(),
-                    thirdParty = report.host != scope.siteScope &&
-                        profile.allowedHosts.none { it.matches(report.host) },
-                    pathScoped = report.pathScoped || report.host == scope.siteScope,
-                    functionalConflict = functionalConflict,
-                    blockedByStaticRule = recent.blockedByStaticRule,
-                    correlatedWithRedirect = recent.correlatedWithRedirect,
-                    siteScope = scope.siteScope,
-                ),
-                profile.adaptivePolicy,
-            )
+            }
         }
+    }
+
+    private fun recentRequestFor(
+        scope: AdaptiveScope,
+        report: AdaptiveDomAdReport,
+        nowMs: Long,
+    ): RecentRequest? = synchronized(recentRequests) {
+        recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
+        recentRequests.lastOrNull {
+            it.scope == scope && it.host == report.host && it.path == report.path
+        }
+    }
+
+    private fun recordCorrelatedReport(
+        profile: SiteProfile,
+        pageUrl: String?,
+        scope: AdaptiveScope,
+        report: AdaptiveDomAdReport,
+        recent: RecentRequest,
+        nowMs: Long,
+    ) {
+        val functionalConflict = profile.adaptivePolicy.protectedHosts.any { it.matches(report.host) } ||
+            isAdaptiveAccountNavigation("https://${report.host}${report.path}")
+        record(
+            AdaptiveAdObservation(
+                profileId = profile.id,
+                host = report.host,
+                path = report.path,
+                pageType = profile.pageTypeForAdaptive(pageUrl),
+                observedAtMs = nowMs,
+                evidence = report.evidence(),
+                thirdParty = report.host != scope.siteScope && profile.allowedHosts.none { it.matches(report.host) },
+                pathScoped = report.pathScoped || report.host == scope.siteScope,
+                functionalConflict = functionalConflict,
+                blockedByStaticRule = recent.blockedByStaticRule,
+                correlatedWithRedirect = recent.correlatedWithRedirect,
+                siteScope = scope.siteScope,
+            ),
+            profile.adaptivePolicy,
+        )
+    }
+
+    private sealed interface LoaderInference {
+        data object None : LoaderInference
+        data class Inferred(val observation: AdaptiveAdObservation) : LoaderInference
+        data class Ambiguous(val candidateCount: Int) : LoaderInference
     }
 
     private fun inferSingleRecentLoader(
@@ -325,18 +395,22 @@ class AdaptiveShieldController(
         profile: SiteProfile,
         structure: AdaptiveDomAdReport,
         nowMs: Long,
-    ): AdaptiveAdObservation? {
-        if (!structure.explicitAdSlot && !structure.sponsoredAttribution) return null
+        excludedDirectLoaders: Set<String> = emptySet(),
+    ): LoaderInference {
+        if (!structure.explicitAdSlot && !structure.sponsoredAttribution) return LoaderInference.None
         val scripts = synchronized(recentRequests) {
             recentRequests.filter {
-                nowMs - it.observedAtMs <= DOM_CORRELATION_WINDOW_MS &&
-                    it.scope == scope && it.resourceKind == AdaptiveResourceKind.OTHER &&
-                    it.host != scope.siteScope && it.path.matches(Regex(".*\\.(m?js)$", RegexOption.IGNORE_CASE)) &&
+                nowMs - it.observedAtMs <= LOADER_INFERENCE_WINDOW_MS &&
+                    it.scope == scope && it.resourceKind == AdaptiveResourceKind.SCRIPT &&
+                    it.host != scope.siteScope &&
+                    "${it.host}${it.path}" !in excludedDirectLoaders &&
                     profile.adaptivePolicy.protectedHosts.none { pattern -> pattern.matches(it.host) }
             }.distinctBy { "${it.host}${it.path}" }
         }
-        val script = scripts.singleOrNull() ?: return null
-        return AdaptiveAdObservation(
+        if (scripts.isEmpty()) return LoaderInference.None
+        if (scripts.size != 1) return LoaderInference.Ambiguous(scripts.size.coerceAtMost(MAX_RECENT_REQUESTS))
+        val script = scripts.single()
+        return LoaderInference.Inferred(AdaptiveAdObservation(
             profileId = profile.id,
             host = script.host,
             path = script.path,
@@ -354,8 +428,14 @@ class AdaptiveShieldController(
             blockedByStaticRule = script.blockedByStaticRule,
             correlatedWithRedirect = script.correlatedWithRedirect,
             siteScope = scope.siteScope,
-        )
+        ))
     }
+
+    private fun adaptiveSlotEvent(slotId: Int, state: String): DebugEvent = DebugEvent(
+        category = DebugEventCategory.ADAPTIVE_OBSERVE,
+        message = "Adaptive slot correlation",
+        detail = "slot=$slotId $state",
+    )
 
     fun decideRequest(
         profile: SiteProfile,
@@ -478,6 +558,7 @@ class AdaptiveShieldController(
         const val MAX_RECENT_REQUESTS = 128
         const val MAX_DOM_REPORTS_PER_BATCH = 32
         const val DOM_CORRELATION_WINDOW_MS = 20_000L
+        const val LOADER_INFERENCE_WINDOW_MS = 5_000L
     }
 }
 

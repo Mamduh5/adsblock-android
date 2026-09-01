@@ -2,8 +2,9 @@ package com.example.siteshield
 
 import java.util.Locale
 
-private const val DOM_AD_REPORT_VERSION = "A3"
+private const val DOM_AD_REPORT_VERSION = "A4"
 private const val DOM_AD_REPORT_MAX = 32
+private const val DOM_AD_SLOT_ID_MAX = 4_096
 
 enum class AdaptiveAdResourceRole {
     STRUCTURE,
@@ -20,6 +21,7 @@ data class AdaptiveDomAdReport(
     val iframeAssociation: Boolean,
     val overlayLayout: Boolean,
     val pathScoped: Boolean,
+    val slotId: Int = 1,
 ) {
     fun evidence(): AdaptiveAdEvidence = AdaptiveAdEvidence(
         explicitAdSlotCount = if (explicitAdSlot) 1 else 0,
@@ -30,25 +32,45 @@ data class AdaptiveDomAdReport(
     )
 }
 
+data class AdaptiveDomAdDrain(
+    val reports: List<AdaptiveDomAdReport>,
+    val observerInstalled: Boolean,
+    val overflowCount: Int,
+    val pendingCount: Int,
+)
+
 /** Parses only the compact, query-free records returned by the bundled observer asset. */
 fun parseAdaptiveDomAdReports(serialized: String?): List<AdaptiveDomAdReport> {
-    if (serialized.isNullOrBlank()) return emptyList()
-    return serialized.lineSequence()
+    return parseAdaptiveDomAdDrain(serialized).reports
+}
+
+fun parseAdaptiveDomAdDrain(serialized: String?): AdaptiveDomAdDrain {
+    if (serialized.isNullOrBlank()) return AdaptiveDomAdDrain(emptyList(), false, 0, 0)
+    val lines = serialized.lineSequence().toList()
+    val metadata = lines.firstOrNull()?.split('\t').orEmpty()
+    val hasMetadata = metadata.size == 4 && metadata[0] == "M4"
+    val installed = hasMetadata && metadata[1] == "1"
+    val overflow = if (hasMetadata) metadata[2].toIntOrNull()?.coerceIn(0, 10_000) ?: 0 else 0
+    val pending = if (hasMetadata) metadata[3].toIntOrNull()?.coerceIn(0, 128) ?: 0 else 0
+    val reports = lines.asSequence()
+        .drop(if (hasMetadata) 1 else 0)
         .take(DOM_AD_REPORT_MAX)
         .mapNotNull(::parseAdaptiveDomAdReport)
         .distinct()
         .toList()
+    return AdaptiveDomAdDrain(reports, installed, overflow, pending)
 }
 
 private fun parseAdaptiveDomAdReport(line: String): AdaptiveDomAdReport? = runCatching {
     val fields = line.split('\t')
-    if (fields.size != 7 || fields[0] != DOM_AD_REPORT_VERSION) return null
+    if (fields.size != 8 || fields[0] != DOM_AD_REPORT_VERSION) return null
     val flags = fields[1].toInt().takeIf { it in 1..15 } ?: return null
     val role = AdaptiveAdResourceRole.valueOf(fields[2].uppercase(Locale.US))
-    val host = fields[3].normalizedHost() ?: return null
-    val path = sanitizeAdaptivePath(fields[4])
-    val pathScoped = fields[5].toBooleanStrict()
-    val structuralContext = fields[6].toBooleanStrict()
+    val slotId = fields[3].toIntOrNull()?.takeIf { it in 1..DOM_AD_SLOT_ID_MAX } ?: return null
+    val host = fields[4].normalizedHost() ?: return null
+    val path = sanitizeAdaptivePath(fields[5])
+    val pathScoped = fields[6].toBooleanStrict()
+    val structuralContext = fields[7].toBooleanStrict()
     val explicit = flags and 1 != 0
     val sponsored = flags and 2 != 0
     val iframe = flags and 4 != 0
@@ -56,7 +78,7 @@ private fun parseAdaptiveDomAdReport(line: String): AdaptiveDomAdReport? = runCa
     if (!structuralContext || (!explicit && !sponsored)) return null
     if (role == AdaptiveAdResourceRole.IFRAME && !iframe) return null
     if (overlay && !explicit && !sponsored && !iframe) return null
-    AdaptiveDomAdReport(role, host, path, explicit, sponsored, iframe, overlay, pathScoped)
+    AdaptiveDomAdReport(role, host, path, explicit, sponsored, iframe, overlay, pathScoped, slotId)
 }.getOrNull()
 
 data class AdaptiveDomNodeFacts(
@@ -68,6 +90,7 @@ data class AdaptiveDomNodeFacts(
     val fixedOrSticky: Boolean = false,
     val viewportCoverage: Double = 0.0,
     val highZIndex: Boolean = false,
+    val slotId: Int = 1,
 )
 
 /** Pure mirror of the asset's conservative evidence gates, used for deterministic policy tests. */
@@ -90,6 +113,7 @@ object AdaptiveDomAdClassifier {
                         iframeAssociation = false,
                         overlayLayout = overlay,
                         pathScoped = false,
+                        slotId = facts.slotId,
                     ),
                 )
             }
@@ -100,6 +124,7 @@ object AdaptiveDomAdClassifier {
                 sponsored,
                 iframe = true,
                 overlay,
+                facts.slotId,
             )?.let(::add)
             reportFor(
                 AdaptiveAdResourceRole.LOADER,
@@ -108,6 +133,7 @@ object AdaptiveDomAdClassifier {
                 sponsored,
                 iframe = false,
                 overlay,
+                facts.slotId,
             )?.let(::add)
         }
     }
@@ -119,6 +145,7 @@ object AdaptiveDomAdClassifier {
         sponsored: Boolean,
         iframe: Boolean,
         overlay: Boolean,
+        slotId: Int,
     ): AdaptiveDomAdReport? {
         val parsed = url?.toUriOrNull() ?: return null
         val host = parsed.host.normalizedHost() ?: return null
@@ -132,6 +159,7 @@ object AdaptiveDomAdClassifier {
             iframeAssociation = iframe,
             overlayLayout = overlay,
             pathScoped = role == AdaptiveAdResourceRole.LOADER || path != "/",
+            slotId = slotId,
         )
     }
 }

@@ -299,10 +299,10 @@ class AdaptiveShieldV3Test {
 
     @Test
     fun `compact DOM report rejects missing structure and unsafe shapes`() {
-        assertTrue(parseAdaptiveDomAdReports("A3\t5\tIFRAME\tads.example\t/render\ttrue\ttrue").isNotEmpty())
-        assertTrue(parseAdaptiveDomAdReports("A3\t4\tIFRAME\tvideo.example\t/embed\ttrue\ttrue").isEmpty())
-        assertTrue(parseAdaptiveDomAdReports("A3\t5\tIFRAME\tads.example\t/render\ttrue\tfalse").isEmpty())
-        assertTrue(parseAdaptiveDomAdReports("A3\t999\tIFRAME\tads.example\t/render\ttrue\ttrue").isEmpty())
+        assertTrue(parseAdaptiveDomAdReports("A4\t5\tIFRAME\t1\tads.example\t/render\ttrue\ttrue").isNotEmpty())
+        assertTrue(parseAdaptiveDomAdReports("A4\t4\tIFRAME\t1\tvideo.example\t/embed\ttrue\ttrue").isEmpty())
+        assertTrue(parseAdaptiveDomAdReports("A4\t5\tIFRAME\t1\tads.example\t/render\ttrue\tfalse").isEmpty())
+        assertTrue(parseAdaptiveDomAdReports("A4\t999\tIFRAME\t1\tads.example\t/render\ttrue\ttrue").isEmpty())
     }
 
     @Test
@@ -380,7 +380,7 @@ class AdaptiveShieldV3Test {
             repeat(3) {
                 controller.observeRequest(
                     profile, siteA, "https://unknown-ads.example/adloader.js",
-                    false, AdaptiveResourceKind.OTHER,
+                    false, AdaptiveResourceKind.SCRIPT,
                 )
                 controller.observeRequest(
                     profile, siteA, "https://frames.example/render/${it + 1}",

@@ -33,6 +33,8 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private data class TabRuntime(
@@ -55,6 +57,13 @@ class MainActivity : Activity() {
     private val pendingScrollRestores = mutableMapOf<String, Int>()
     private val persistenceHandler = Handler(Looper.getMainLooper())
     private val persistSessionRunnable = Runnable { persistSessionNow() }
+    private val adaptiveObserverLifecycle = AdaptiveObserverLifecycle()
+    private val adaptivePeriodicRunnables = mutableMapOf<String, Runnable>()
+    private val adaptiveResourceRunnables = mutableMapOf<String, Runnable>()
+    private val adaptiveResourceSignals = ConcurrentHashMap<String, AtomicBoolean>()
+    private val adaptiveObserverScript: String by lazy {
+        assets.open("dom_ad_observer.js").bufferedReader().use { it.readText() }
+    }
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var webViewClient: SiteShieldWebViewClient
@@ -317,6 +326,11 @@ class MainActivity : Activity() {
                     detail = "blockingActive=${settingsStore.blockerEnabled && updatedMode == AdaptiveShieldMode.AUTO_SAFE}",
                 ),
             )
+            if (AdaptiveRuntimeModePolicy.observes(updatedMode)) {
+                resumeAdaptiveObservation(tabManager.selectedTabId)
+            } else {
+                tabRuntimes.keys.toList().forEach(::stopAdaptiveObservation)
+            }
         }
         val adaptiveStatusButton = largeButton("Adaptive Shield") {
             collapseShieldPanel()
@@ -560,11 +574,14 @@ class MainActivity : Activity() {
             initialUrl = tab.currentUrl,
             onProfileMatched = { matched -> onTabProfileMatched(tab.id, matched) },
             onEvent = ::recordEvent,
-            onPageLoaded = { view ->
-                injectAdaptiveAdObserver(view, followUpPolls = AD_OBSERVER_FOLLOW_UP_POLLS)
-                injectDomCleanup(view)
+            onAdaptivePageReady = { view ->
+                startAdaptiveObservation(tab.id, view)
                 inspectAdaptivePageHealth(view)
             },
+            onStaticCleanupRequested = { view ->
+                injectDomCleanup(view)
+            },
+            onAdaptiveResourceActivity = { signalAdaptiveResourceActivity(tab.id) },
             onPageUsageCheckpoint = ::updateDataUsageReadout,
             onTopLevelNavigationStarted = { matched, url ->
                 onTabNavigationStarted(tab.id, tabWebView, matched, url)
@@ -661,7 +678,9 @@ class MainActivity : Activity() {
         activeProfile = runtime.client.topLevelContextSnapshot().profile
     }
 
-    private fun detachRuntimeView(runtime: TabRuntime) {
+    private fun detachRuntimeView(runtime: TabRuntime, pauseObserver: Boolean = true) {
+        if (pauseObserver) stopAdaptiveObservation(runtime.tabId) else cancelAdaptiveRunnables(runtime.tabId)
+        adaptiveObserverLifecycle.detach(runtime.tabId)
         (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
         browserAttachment.detach(runtime.tabId)
     }
@@ -674,6 +693,8 @@ class MainActivity : Activity() {
         (runtime.webView.parent as? ViewGroup)?.removeView(runtime.webView)
         contentLayer.addView(runtime.webView, 0)
         browserAttachment.attach(runtime.tabId)
+        adaptiveObserverLifecycle.attach(runtime.tabId)
+        resumeAdaptiveObservation(runtime.tabId)
     }
 
     private fun synchronizeSelectedRuntime(runtime: TabRuntime, selected: BrowserTabState) {
@@ -739,11 +760,14 @@ class MainActivity : Activity() {
     }
 
     private fun destroyRuntime(runtime: TabRuntime) {
+        cancelAdaptiveRunnables(runtime.tabId)
+        adaptiveObserverLifecycle.destroy(runtime.tabId)
+        adaptiveResourceSignals.remove(runtime.tabId)
         tabManager.updateScroll(runtime.tabId, runtime.webView.scrollY)
         tabManager.markSuspended(runtime.tabId)
         runtime.downloadIntentTracker.clear()
         pendingScrollRestores.remove(runtime.tabId)
-        detachRuntimeView(runtime)
+        detachRuntimeView(runtime, pauseObserver = false)
         runtime.webView.stopLoading()
         runtime.webView.setDownloadListener(null)
         runtime.webView.webChromeClient = null
@@ -844,6 +868,7 @@ class MainActivity : Activity() {
         profile: SiteProfile,
         url: String?,
     ) {
+        invalidateAdaptiveDocument(tabId)
         tabManager.updateNavigation(tabId, url, profile.id)
         WebViewConfigurator.applyDataSaverPolicy(
             ownerWebView,
@@ -1438,40 +1463,113 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun injectAdaptiveAdObserver(view: WebView, followUpPolls: Int) {
-        val runtime = tabRuntimes.values.firstOrNull { it.webView === view } ?: return
+    private fun startAdaptiveObservation(tabId: String, view: WebView) {
+        if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
+        if (tabRuntimes[tabId]?.webView !== view || browserAttachment.attachedTabId != tabId) return
+        val generation = adaptiveObserverLifecycle.generation(tabId)
+        drainAdaptiveObserver(tabId, generation, "page-ready")
+        scheduleAdaptivePeriodicDrain(tabId, generation)
+    }
+
+    private fun resumeAdaptiveObservation(tabId: String) {
+        if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
+        val runtime = tabRuntimes[tabId] ?: return
+        if (browserAttachment.attachedTabId != tabId || runtime.webView.url.isNullOrBlank()) return
+        val generation = adaptiveObserverLifecycle.generation(tabId)
+        drainAdaptiveObserver(tabId, generation, "tab-active")
+        scheduleAdaptivePeriodicDrain(tabId, generation)
+    }
+
+    private fun signalAdaptiveResourceActivity(tabId: String) {
+        if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
+        val signal = adaptiveResourceSignals.getOrPut(tabId) { AtomicBoolean(false) }
+        if (!signal.compareAndSet(false, true)) return
+        persistenceHandler.post {
+            signal.set(false)
+            scheduleAdaptiveResourceDrain(tabId, ADAPTIVE_RESOURCE_DEBOUNCE_MS)
+        }
+    }
+
+    private fun scheduleAdaptiveResourceDrain(tabId: String, delayMs: Long) {
+        if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
+        val generation = adaptiveObserverLifecycle.generation(tabId)
+        if (!adaptiveObserverLifecycle.scheduleResourceDrain(tabId, generation)) return
+        val runnable = Runnable {
+            adaptiveResourceRunnables.remove(tabId)
+            if (!adaptiveObserverLifecycle.consumeResourceDrain(tabId, generation)) return@Runnable
+            drainAdaptiveObserver(tabId, generation, "resource-activity")
+        }
+        adaptiveResourceRunnables[tabId] = runnable
+        persistenceHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun scheduleAdaptivePeriodicDrain(tabId: String, generation: Long) {
+        if (!adaptiveObserverLifecycle.schedulePeriodic(tabId, generation)) return
+        val runnable = Runnable {
+            adaptivePeriodicRunnables.remove(tabId)
+            if (!adaptiveObserverLifecycle.consumePeriodic(tabId, generation)) return@Runnable
+            drainAdaptiveObserver(tabId, generation, "active-fallback")
+            scheduleAdaptivePeriodicDrain(tabId, generation)
+        }
+        adaptivePeriodicRunnables[tabId] = runnable
+        persistenceHandler.postDelayed(runnable, ADAPTIVE_ACTIVE_FALLBACK_MS)
+    }
+
+    private fun drainAdaptiveObserver(tabId: String, generation: Long, reason: String) {
+        if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
+        if (!adaptiveObserverLifecycle.isCurrentActive(tabId, generation)) return
+        val runtime = tabRuntimes[tabId] ?: return
         val context = runtime.client.topLevelContextSnapshot()
         val profile = context.profile
-        val pageUrl = view.url ?: context.url ?: return
+        val pageUrl = runtime.webView.url ?: context.url ?: return
         val scope = adaptiveScope(profile, pageUrl) ?: return
-        val script = assets.open("dom_ad_observer.js").bufferedReader().use { it.readText() }
-        view.evaluateJavascript(script) { raw ->
-            val currentRuntime = tabRuntimes[runtime.tabId]?.takeIf { it.webView === view }
+        runtime.webView.evaluateJavascript(adaptiveObserverScript) { raw ->
+            if (!adaptiveObserverLifecycle.isCurrentActive(tabId, generation)) return@evaluateJavascript
+            val currentRuntime = tabRuntimes[tabId]?.takeIf { it.webView === runtime.webView }
                 ?: return@evaluateJavascript
             val currentContext = currentRuntime.client.topLevelContextSnapshot()
             if (adaptiveScope(currentContext.profile, currentContext.url) != scope) return@evaluateJavascript
-            val reports = parseAdaptiveDomAdReports(decodeJavascriptString(raw))
-            if (reports.isNotEmpty()) {
-                adaptiveShieldController.observeDomAdEvidence(profile, pageUrl, reports)
-                recordEvent(
-                    DebugEvent(
-                        category = DebugEventCategory.ADAPTIVE_OBSERVE,
-                        message = "[${profile.displayName}] Structured DOM ad evidence",
-                        detail = "scope=${scope.diagnosticName}, reports=${reports.size}",
-                    ),
-                )
+            val drain = parseAdaptiveDomAdDrain(decodeJavascriptString(raw))
+            if (drain.observerInstalled) {
+                recordEvent(adaptiveObserverEvent("observer-installed", scope, reason))
+            }
+            if (drain.reports.isNotEmpty()) {
+                adaptiveShieldController.observeDomAdEvidence(profile, pageUrl, drain.reports)
+                recordEvent(adaptiveObserverEvent("observer-drain reports=${drain.reports.size}", scope, reason))
+            }
+            if (drain.overflowCount > 0) {
+                recordEvent(adaptiveObserverEvent("observer-buffer-overflow count=${drain.overflowCount}", scope, reason))
+            }
+            if (drain.pendingCount > 0) {
+                scheduleAdaptiveResourceDrain(tabId, ADAPTIVE_PENDING_DRAIN_MS)
             }
         }
-        if (followUpPolls > 0) {
-            view.postDelayed(
-                {
-                    if (tabRuntimes[runtime.tabId]?.webView === view) {
-                        injectAdaptiveAdObserver(view, followUpPolls = followUpPolls - 1)
-                    }
-                },
-                AD_OBSERVER_BATCH_WINDOW_MS,
-            )
-        }
+    }
+
+    private fun adaptiveObserverEvent(state: String, scope: AdaptiveScope, reason: String): DebugEvent = DebugEvent(
+        category = DebugEventCategory.ADAPTIVE_OBSERVE,
+        message = "Adaptive DOM observer",
+        detail = "$state scope=${scope.diagnosticName} trigger=$reason",
+    )
+
+    private fun invalidateAdaptiveDocument(tabId: String) {
+        cancelAdaptiveRunnables(tabId)
+        adaptiveObserverLifecycle.documentStarted(tabId)
+    }
+
+    private fun stopAdaptiveObservation(tabId: String) {
+        cancelAdaptiveRunnables(tabId)
+        adaptiveObserverLifecycle.pause(tabId)
+        tabRuntimes[tabId]?.webView?.evaluateJavascript(
+            "if(window.__siteShieldAdObserverSetActive){window.__siteShieldAdObserverSetActive(false);}",
+            null,
+        )
+    }
+
+    private fun cancelAdaptiveRunnables(tabId: String) {
+        adaptivePeriodicRunnables.remove(tabId)?.let(persistenceHandler::removeCallbacks)
+        adaptiveResourceRunnables.remove(tabId)?.let(persistenceHandler::removeCallbacks)
+        adaptiveResourceSignals[tabId]?.set(false)
     }
 
     private fun showProfilePicker() {
@@ -1633,8 +1731,9 @@ class MainActivity : Activity() {
     companion object {
         private const val MAX_EVENTS = 200
         private const val DOM_LOG_PREFIX = "[SiteShield]"
-        private const val AD_OBSERVER_BATCH_WINDOW_MS = 1_000L
-        private const val AD_OBSERVER_FOLLOW_UP_POLLS = 3
+        private const val ADAPTIVE_RESOURCE_DEBOUNCE_MS = 350L
+        private const val ADAPTIVE_PENDING_DRAIN_MS = 50L
+        private const val ADAPTIVE_ACTIVE_FALLBACK_MS = 15_000L
     }
 }
 

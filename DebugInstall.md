@@ -89,6 +89,20 @@ DOM structural candidates remain review-only in v2; no DOM adaptive auto-enforce
 
 Physical success requires visible before/after ad behavior and working main content; diagnostics or JVM tests alone are not physical acceptance.
 
+## Adaptive Shield v3.1 late-ad runtime test
+
+1. Set Adaptive to LEARN, load a page with ads, and wait longer than three seconds without reloading.
+2. Scroll until a lazy ad appears. Verify `observer-drain` and slot-scoped structure/iframe evidence appears after the late resource activity.
+3. If the page refreshes an ad, wait for the refresh and verify the changed iframe state produces new evidence for the same ephemeral slot.
+4. Repeat on a page with multiple ad slots. Verify diagnostics use separate page-local slot numbers even when slots share a normalized provider path.
+5. Turn the static Blocker OFF while Adaptive remains LEARN. Reload or browse and verify Adaptive evidence still accumulates, while static DOM cleanup and all static/Adaptive enforcement remain off.
+6. Turn Adaptive OFF and verify observer drains stop. Turn it back to LEARN on the already-open selected page and verify observation resumes without restarting the app.
+7. Open a second tab, then switch tabs. Verify only the selected attached page produces periodic observer drains; background/destroyed tabs must not keep polling.
+8. On a page with several unrelated third-party scripts, verify ambiguous loader diagnostics remain observation-only rather than selecting a random script.
+9. Switch to AUTO_SAFE, reload, and verify only qualified learned loader/iframe infrastructure is blocked while content, media, login, navigation, and downloads remain functional.
+
+Late-ad acceptance requires real evidence appearing after the old three-second window. JVM lifecycle/correlation tests do not replace this physical check.
+
 ## Downloads v1 physical test
 
 1. Serve or open a safe page containing a small PDF, image, and ZIP/text link.

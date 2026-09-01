@@ -42,6 +42,7 @@ enum class AdaptiveCandidateState {
 
 enum class AdaptiveResourceKind {
     OTHER,
+    SCRIPT,
     IMAGE,
     VIDEO,
     FONT,
@@ -834,6 +835,10 @@ fun adaptiveResourceKind(url: String, headers: Map<String, String>): AdaptiveRes
         ?.lowercase(Locale.US)
         .orEmpty()
     val path = url.toUriOrNull()?.path?.lowercase(Locale.US).orEmpty()
+    val fetchDestination = headers.entries.firstOrNull { it.key.equals("Sec-Fetch-Dest", ignoreCase = true) }
+        ?.value
+        ?.lowercase(Locale.US)
+        .orEmpty()
     return when {
         accept.contains("image/") || path.matches(Regex(".*\\.(png|jpe?g|webp|gif|avif|svg)$")) ->
             AdaptiveResourceKind.IMAGE
@@ -841,6 +846,8 @@ fun adaptiveResourceKind(url: String, headers: Map<String, String>): AdaptiveRes
             AdaptiveResourceKind.VIDEO
         accept.contains("font/") || path.matches(Regex(".*\\.(woff2?|ttf|otf)$")) ->
             AdaptiveResourceKind.FONT
+        fetchDestination == "script" || accept.contains("javascript") || accept.contains("ecmascript") ||
+            path.matches(Regex(".*\\.m?js$")) -> AdaptiveResourceKind.SCRIPT
         else -> AdaptiveResourceKind.OTHER
     }
 }

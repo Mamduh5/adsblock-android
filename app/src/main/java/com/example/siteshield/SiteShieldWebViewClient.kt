@@ -23,7 +23,9 @@ class SiteShieldWebViewClient(
     initialUrl: String? = null,
     private val onProfileMatched: (SiteProfile) -> Unit,
     private val onEvent: (DebugEvent) -> Unit,
-    private val onPageLoaded: (WebView) -> Unit,
+    private val onAdaptivePageReady: (WebView) -> Unit,
+    private val onStaticCleanupRequested: (WebView) -> Unit,
+    private val onAdaptiveResourceActivity: () -> Unit,
     private val onPageUsageCheckpoint: () -> Unit,
     private val onTopLevelNavigationStarted: (SiteProfile, String?) -> Unit,
     private val onRendererGone: () -> Unit = {},
@@ -283,13 +285,16 @@ class SiteShieldWebViewClient(
         } else {
             BlockDecision.Allow
         }
-        adaptiveShieldController.observeRequest(
-            profile = profile,
-            pageUrl = activeContext.url,
-            requestUrl = requestUrl,
-            blockedByStaticRule = decision is BlockDecision.Block,
-            resourceKind = resourceKind,
-        )
+        if (AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) {
+            adaptiveShieldController.observeRequest(
+                profile = profile,
+                pageUrl = activeContext.url,
+                requestUrl = requestUrl,
+                blockedByStaticRule = decision is BlockDecision.Block,
+                resourceKind = resourceKind,
+            )
+            onAdaptiveResourceActivity()
+        }
         if (decision is BlockDecision.Block) {
             val pageType = blockerEngine.classifyPageType(profile, activeContext.url)
             onEvent(
@@ -358,8 +363,9 @@ class SiteShieldWebViewClient(
 
     override fun onPageFinished(view: WebView, url: String?) {
         super.onPageFinished(view, url)
-        if (settingsStore.blockerEnabled) {
-            onPageLoaded(view)
+        if (AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) onAdaptivePageReady(view)
+        if (AdaptiveRuntimeModePolicy.performsStaticCleanup(settingsStore.blockerEnabled)) {
+            onStaticCleanupRequested(view)
         }
         onPageReady(view)
         onPageUsageCheckpoint()
@@ -399,8 +405,9 @@ class SiteShieldWebViewClient(
                 detail = blockerEngine.describePolicy(updatedContext.profile, pageType),
             ),
         )
-        if (settingsStore.blockerEnabled) {
-            onPageLoaded(view)
+        if (AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) onAdaptivePageReady(view)
+        if (AdaptiveRuntimeModePolicy.performsStaticCleanup(settingsStore.blockerEnabled)) {
+            onStaticCleanupRequested(view)
         }
         onPageUsageCheckpoint()
     }

@@ -51,7 +51,7 @@ class AdaptivePolicyTest {
             ),
         )
         assertEquals(
-            AdaptiveResourceKind.OTHER,
+            AdaptiveResourceKind.SCRIPT,
             adaptiveResourceKind("https://cdn.example/runtime.js", emptyMap()),
         )
     }
