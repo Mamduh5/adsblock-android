@@ -37,11 +37,11 @@ class AdaptiveShieldV2Test {
     }
 
     @Test
-    fun `generic first party request is functional rather than third party`() {
+    fun `generic first party request is observable without automatic functional evidence`() {
         val observation = request(siteA, "site-a.example", atMs = 1)
 
         assertFalse(observation.thirdParty)
-        assertTrue(observation.functionalEvidence)
+        assertFalse(observation.functionalEvidence)
         assertEquals("site-a.example", observation.siteScope)
     }
 

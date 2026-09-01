@@ -22,6 +22,7 @@ enum class AdaptiveCandidateType {
     OFFSITE_REDIRECT_HOST,
     THIRD_PARTY_REQUEST_HOST,
     FIRST_PARTY_LOADER,
+    AD_RESOURCE,
     DOM_STRUCTURE,
 }
 
@@ -79,7 +80,19 @@ data class AdaptivePolicy(
             protectedHosts.any { it.matches(host) }
 
     fun isFunctionalEvidence(host: String?, kind: AdaptiveResourceKind): Boolean =
-        protectsFromEnforcement(host, kind)
+        protectedHosts.any { it.matches(host) }
+}
+
+data class AdaptiveAdEvidence(
+    val explicitAdSlotCount: Int = 0,
+    val sponsoredAttributionCount: Int = 0,
+    val adIframeCorrelationCount: Int = 0,
+    val overlayAdCount: Int = 0,
+    val repeatedLoaderCorrelationCount: Int = 0,
+) {
+    val total: Int
+        get() = explicitAdSlotCount + sponsoredAttributionCount + adIframeCorrelationCount +
+            overlayAdCount + repeatedLoaderCorrelationCount
 }
 
 data class AdaptiveLearningConfig(
@@ -99,6 +112,13 @@ data class AdaptiveLearningConfig(
     val correlatedRedirectWeight: Int = 35,
     val exactLoaderPathWeight: Int = 60,
     val domObservationWeight: Int = 5,
+    val explicitAdSlotWeight: Int = 70,
+    val sponsoredAttributionWeight: Int = 35,
+    val adIframeCorrelationWeight: Int = 55,
+    val overlayAdWeight: Int = 25,
+    val repeatedLoaderCorrelationWeight: Int = 75,
+    val adResourceAutoThreshold: Int = 280,
+    val adResourceAutoMinimumOccurrences: Int = 3,
     val firstPartyPenalty: Int = 15,
     val functionalEvidencePenalty: Int = 80,
     val candidateExpiryMs: Long = 14L * DAY_MS,
@@ -113,6 +133,7 @@ data class AdaptiveLearningConfig(
         require(redirectAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(thirdPartyAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(loaderAutoMinimumOccurrences >= candidateMinimumOccurrences)
+        require(adResourceAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(candidateExpiryMs > 0 && learnedDormancyMs > candidateExpiryMs)
         require(learnedRetirementMs > learnedDormancyMs)
         require(maxCandidatesPerProfile > 0 && maxLearnedRulesPerProfile > 0)
@@ -168,6 +189,21 @@ data class AdaptiveDomObservation(
     override val siteScope: String? = null,
 ) : AdaptiveObservation
 
+data class AdaptiveAdObservation(
+    override val profileId: String,
+    override val host: String,
+    override val path: String?,
+    override val pageType: PageType,
+    override val observedAtMs: Long,
+    val evidence: AdaptiveAdEvidence,
+    val thirdParty: Boolean,
+    val pathScoped: Boolean,
+    val functionalConflict: Boolean = false,
+    val blockedByStaticRule: Boolean = false,
+    val correlatedWithRedirect: Boolean = false,
+    override val siteScope: String? = null,
+) : AdaptiveObservation
+
 data class AdaptiveRecord(
     val id: String,
     val profileId: String,
@@ -190,6 +226,10 @@ data class AdaptiveRecord(
     val score: Int,
     val confidence: Int,
     val siteScope: String? = null,
+    val adEvidence: AdaptiveAdEvidence = AdaptiveAdEvidence(),
+    val pathScoped: Boolean = false,
+    val promotionReason: String? = null,
+    val safetyConflict: String? = null,
 )
 
 sealed interface AdaptiveDecision {
@@ -253,6 +293,9 @@ class AdaptiveShieldEngine(
         val type = observation.candidateType()
         val path = when (type) {
             AdaptiveCandidateType.FIRST_PARTY_LOADER -> observation.path
+            AdaptiveCandidateType.AD_RESOURCE -> observation.path?.takeIf {
+                (observation as AdaptiveAdObservation).pathScoped
+            }
             AdaptiveCandidateType.DOM_STRUCTURE ->
                 (observation as AdaptiveDomObservation).fingerprint.safeDomFingerprint()
             else -> null
@@ -282,6 +325,7 @@ class AdaptiveShieldEngine(
             score = 0,
             confidence = 0,
             siteScope = observation.siteScope,
+            pathScoped = (observation as? AdaptiveAdObservation)?.pathScoped == true,
         )
         if (base.state == AdaptiveCandidateState.REJECTED) return null
 
@@ -312,7 +356,11 @@ class AdaptiveShieldEngine(
             eligibleForAuto(candidate, policy) &&
             learnedCount(scope) < config.maxLearnedRulesPerProfile
         ) {
-            candidate.copy(state = AdaptiveCandidateState.LEARNED, learnedAtMs = observation.observedAtMs)
+            candidate.copy(
+                state = AdaptiveCandidateState.LEARNED,
+                learnedAtMs = observation.observedAtMs,
+                promotionReason = promotionReason(candidate),
+            )
         } else {
             candidate
         }
@@ -331,7 +379,11 @@ class AdaptiveShieldEngine(
                 eligibleForAuto(record, policyByProfile(record.profileId)) &&
                 learnedCount(record.scope()) < config.maxLearnedRulesPerProfile
             ) {
-                record.copy(state = AdaptiveCandidateState.LEARNED, learnedAtMs = nowMs)
+                record.copy(
+                    state = AdaptiveCandidateState.LEARNED,
+                    learnedAtMs = nowMs,
+                    promotionReason = promotionReason(record),
+                )
             } else {
                 record
             }
@@ -364,10 +416,12 @@ class AdaptiveShieldEngine(
                 record.type in setOf(
                     AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
                     AdaptiveCandidateType.FIRST_PARTY_LOADER,
+                    AdaptiveCandidateType.AD_RESOURCE,
                 ) &&
                 record.host == host &&
                 when (record.type) {
                     AdaptiveCandidateType.FIRST_PARTY_LOADER -> record.path == path
+                    AdaptiveCandidateType.AD_RESOURCE -> record.path == null || path.startsWith(record.path)
                     AdaptiveCandidateType.DOM_STRUCTURE -> false
                     else -> true
                 }
@@ -543,28 +597,76 @@ class AdaptiveShieldEngine(
                 record.path != null &&
                     record.occurrenceCount >= config.loaderAutoMinimumOccurrences &&
                     record.score >= config.loaderAutoThreshold
+            AdaptiveCandidateType.AD_RESOURCE -> adResourceEligible(record)
             AdaptiveCandidateType.DOM_STRUCTURE -> false
         }
+    }
+
+    private fun adResourceEligible(record: AdaptiveRecord): Boolean {
+        val evidence = record.adEvidence
+        val independentAdPath =
+            evidence.repeatedLoaderCorrelationCount >= 3 ||
+                (evidence.explicitAdSlotCount >= 2 && evidence.adIframeCorrelationCount >= 2) ||
+                (evidence.sponsoredAttributionCount >= 3 && evidence.adIframeCorrelationCount >= 2) ||
+                (evidence.overlayAdCount >= 2 && evidence.adIframeCorrelationCount >= 2)
+        val firstParty = record.siteScope == record.host
+        val firstPartySafe = !firstParty ||
+            (record.pathScoped && (
+                evidence.repeatedLoaderCorrelationCount >= 4 ||
+                    (evidence.explicitAdSlotCount >= 3 && evidence.adIframeCorrelationCount >= 3)
+                ))
+        return record.occurrenceCount >= config.adResourceAutoMinimumOccurrences &&
+            record.score >= config.adResourceAutoThreshold && independentAdPath && firstPartySafe
+    }
+
+    private fun promotionReason(record: AdaptiveRecord): String? = when (record.type) {
+        AdaptiveCandidateType.AD_RESOURCE -> when {
+            record.adEvidence.repeatedLoaderCorrelationCount >= 3 -> "repeated-loader+dom-ad"
+            record.adEvidence.explicitAdSlotCount >= 2 && record.adEvidence.adIframeCorrelationCount >= 2 ->
+                "explicit-ad-slot+iframe-correlation"
+            record.adEvidence.sponsoredAttributionCount >= 3 -> "sponsored-attribution+iframe-correlation"
+            record.adEvidence.overlayAdCount >= 2 -> "overlay-ad+iframe-correlation"
+            else -> null
+        }
+        AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> when {
+            record.staticBlockCount >= 3 -> "static-block-evidence"
+            record.redirectCorrelationCount >= 2 -> "redirect-correlation"
+            else -> null
+        }
+        AdaptiveCandidateType.OFFSITE_REDIRECT_HOST -> "offsite-redirect-evidence"
+        AdaptiveCandidateType.FIRST_PARTY_LOADER -> "configured-first-party-loader"
+        AdaptiveCandidateType.DOM_STRUCTURE -> null
     }
 
     private fun score(record: AdaptiveRecord): Int {
         val positive = when (record.type) {
             AdaptiveCandidateType.OFFSITE_REDIRECT_HOST ->
-                record.popupCount * config.popupWeight +
-                    (record.occurrenceCount - record.popupCount).coerceAtLeast(0) *
+                record.popupCount.toLong() * config.popupWeight +
+                    (record.occurrenceCount - record.popupCount).coerceAtLeast(0).toLong() *
                     config.offsiteNavigationWeight +
-                    record.sourcePolicyBlockCount * config.sourcePolicyBlockWeight
+                    record.sourcePolicyBlockCount.toLong() * config.sourcePolicyBlockWeight
             AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST ->
-                record.staticBlockCount * config.staticRequestBlockWeight +
-                    record.thirdPartyCount * config.thirdPartyWeight +
-                    record.redirectCorrelationCount * config.correlatedRedirectWeight
+                record.staticBlockCount.toLong() * config.staticRequestBlockWeight +
+                    record.thirdPartyCount.toLong() * config.thirdPartyWeight +
+                    record.redirectCorrelationCount.toLong() * config.correlatedRedirectWeight
             AdaptiveCandidateType.FIRST_PARTY_LOADER ->
-                record.staticBlockCount * config.staticRequestBlockWeight +
-                    record.occurrenceCount * (config.exactLoaderPathWeight - config.firstPartyPenalty)
+                record.staticBlockCount.toLong() * config.staticRequestBlockWeight +
+                    record.occurrenceCount.toLong() * (config.exactLoaderPathWeight - config.firstPartyPenalty)
+            AdaptiveCandidateType.AD_RESOURCE -> with(record.adEvidence) {
+                explicitAdSlotCount.toLong() * config.explicitAdSlotWeight +
+                    sponsoredAttributionCount.toLong() * config.sponsoredAttributionWeight +
+                    adIframeCorrelationCount.toLong() * config.adIframeCorrelationWeight +
+                    overlayAdCount.toLong() * config.overlayAdWeight +
+                    repeatedLoaderCorrelationCount.toLong() * config.repeatedLoaderCorrelationWeight +
+                    record.staticBlockCount.toLong() * config.staticRequestBlockWeight +
+                    record.redirectCorrelationCount.toLong() * config.correlatedRedirectWeight
+            }
             AdaptiveCandidateType.DOM_STRUCTURE ->
-                record.occurrenceCount * config.domObservationWeight
+                record.occurrenceCount.toLong() * config.domObservationWeight
         }
-        return (positive - record.functionalEvidenceCount * config.functionalEvidencePenalty).coerceAtLeast(0)
+        return (positive - record.functionalEvidenceCount.toLong() * config.functionalEvidencePenalty)
+            .coerceIn(0, Int.MAX_VALUE.toLong())
+            .toInt()
     }
 
     private fun confidence(score: Int, threshold: Int): Int =
@@ -574,6 +676,7 @@ class AdaptiveShieldEngine(
         AdaptiveCandidateType.OFFSITE_REDIRECT_HOST -> config.redirectAutoThreshold
         AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> config.thirdPartyAutoThreshold
         AdaptiveCandidateType.FIRST_PARTY_LOADER -> config.loaderAutoThreshold
+        AdaptiveCandidateType.AD_RESOURCE -> config.adResourceAutoThreshold
         AdaptiveCandidateType.DOM_STRUCTURE -> Int.MAX_VALUE
     }
 
@@ -608,6 +711,26 @@ class AdaptiveShieldEngine(
         )
         is AdaptiveDomObservation -> copy(
             occurrenceCount = occurrenceCount + 1,
+            lastSeenAtMs = observation.observedAtMs,
+        )
+        is AdaptiveAdObservation -> copy(
+            occurrenceCount = occurrenceCount + 1,
+            staticBlockCount = staticBlockCount + if (observation.blockedByStaticRule) 1 else 0,
+            redirectCorrelationCount = redirectCorrelationCount + if (observation.correlatedWithRedirect) 1 else 0,
+            thirdPartyCount = thirdPartyCount + if (observation.thirdParty) 1 else 0,
+            functionalEvidenceCount = functionalEvidenceCount + if (observation.functionalConflict) 1 else 0,
+            adEvidence = AdaptiveAdEvidence(
+                explicitAdSlotCount = adEvidence.explicitAdSlotCount + observation.evidence.explicitAdSlotCount,
+                sponsoredAttributionCount = adEvidence.sponsoredAttributionCount +
+                    observation.evidence.sponsoredAttributionCount,
+                adIframeCorrelationCount = adEvidence.adIframeCorrelationCount +
+                    observation.evidence.adIframeCorrelationCount,
+                overlayAdCount = adEvidence.overlayAdCount + observation.evidence.overlayAdCount,
+                repeatedLoaderCorrelationCount = adEvidence.repeatedLoaderCorrelationCount +
+                    observation.evidence.repeatedLoaderCorrelationCount,
+            ),
+            pathScoped = pathScoped || observation.pathScoped,
+            safetyConflict = if (observation.functionalConflict) "functional-conflict" else safetyConflict,
             lastSeenAtMs = observation.observedAtMs,
         )
     }
@@ -667,7 +790,7 @@ object AdaptiveObservationFactory {
             thirdParty = !firstParty,
             blockedByStaticRule = blockedByStaticRule,
             correlatedWithRedirect = correlatedWithRedirect,
-            functionalEvidence = functionalEvidence || (firstParty && !loaderPath),
+            functionalEvidence = functionalEvidence,
             loaderPath = loaderPath,
             resourceKind = resourceKind,
             siteScope = scope.siteScope,
@@ -726,6 +849,7 @@ private fun AdaptiveObservation.candidateType(): AdaptiveCandidateType = when (t
     is AdaptiveNavigationObservation -> AdaptiveCandidateType.OFFSITE_REDIRECT_HOST
     is AdaptiveRequestObservation ->
         if (loaderPath) AdaptiveCandidateType.FIRST_PARTY_LOADER else AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST
+    is AdaptiveAdObservation -> AdaptiveCandidateType.AD_RESOURCE
     is AdaptiveDomObservation -> AdaptiveCandidateType.DOM_STRUCTURE
 }
 
@@ -733,6 +857,7 @@ private fun AdaptiveCandidateType.riskTier(): AdaptiveRiskTier = when (this) {
     AdaptiveCandidateType.OFFSITE_REDIRECT_HOST -> AdaptiveRiskTier.LOW_RISK
     AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
     AdaptiveCandidateType.FIRST_PARTY_LOADER,
+    AdaptiveCandidateType.AD_RESOURCE,
     -> AdaptiveRiskTier.MEDIUM_RISK
     AdaptiveCandidateType.DOM_STRUCTURE -> AdaptiveRiskTier.HIGH_RISK
 }

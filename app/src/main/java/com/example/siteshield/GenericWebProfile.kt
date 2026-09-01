@@ -23,6 +23,7 @@ object GenericWebProfile {
             autoPromoteTypes = setOf(
                 AdaptiveCandidateType.OFFSITE_REDIRECT_HOST,
                 AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
+                AdaptiveCandidateType.AD_RESOURCE,
             ),
         ),
         suspiciousCookieKeyPatterns = listOf(suspiciousKeyRegex()),

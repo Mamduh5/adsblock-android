@@ -561,6 +561,7 @@ class MainActivity : Activity() {
             onProfileMatched = { matched -> onTabProfileMatched(tab.id, matched) },
             onEvent = ::recordEvent,
             onPageLoaded = { view ->
+                injectAdaptiveAdObserver(view, followUpPolls = AD_OBSERVER_FOLLOW_UP_POLLS)
                 injectDomCleanup(view)
                 inspectAdaptivePageHealth(view)
             },
@@ -1108,6 +1109,13 @@ class MainActivity : Activity() {
                     "Seen: ${record.occurrenceCount}  Confidence: ${record.confidence}\n" +
                     "Static: ${record.staticBlockCount}  Third-party: ${record.thirdPartyCount}\n" +
                     "Redirect: ${record.redirectCorrelationCount}  Functional: ${record.functionalEvidenceCount}\n" +
+                    "Ad slot: ${record.adEvidence.explicitAdSlotCount}  " +
+                    "Sponsored: ${record.adEvidence.sponsoredAttributionCount}\n" +
+                    "Ad iframe: ${record.adEvidence.adIframeCorrelationCount}  " +
+                    "Overlay: ${record.adEvidence.overlayAdCount}  " +
+                    "Loader: ${record.adEvidence.repeatedLoaderCorrelationCount}\n" +
+                    "Promotion: ${record.promotionReason ?: "not eligible"}  " +
+                    "Safety: ${record.safetyConflict ?: "none"}\n" +
                     "Path: ${record.path ?: "host only"}\nRule: ${record.id}",
             )
             .setItems(actions.toTypedArray()) { _, index ->
@@ -1126,6 +1134,7 @@ class MainActivity : Activity() {
             AdaptiveCandidateType.OFFSITE_REDIRECT_HOST -> "Offsite redirect"
             AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> "Third-party request"
             AdaptiveCandidateType.FIRST_PARTY_LOADER -> "Loader"
+            AdaptiveCandidateType.AD_RESOURCE -> if (record.pathScoped) "Ad resource path" else "Ad resource host"
             AdaptiveCandidateType.DOM_STRUCTURE -> "DOM candidate (review only)"
         }
         return "${record.state}: ${record.host}\n$kind · Seen ${record.occurrenceCount} · Confidence ${record.confidence}"
@@ -1429,6 +1438,42 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun injectAdaptiveAdObserver(view: WebView, followUpPolls: Int) {
+        val runtime = tabRuntimes.values.firstOrNull { it.webView === view } ?: return
+        val context = runtime.client.topLevelContextSnapshot()
+        val profile = context.profile
+        val pageUrl = view.url ?: context.url ?: return
+        val scope = adaptiveScope(profile, pageUrl) ?: return
+        val script = assets.open("dom_ad_observer.js").bufferedReader().use { it.readText() }
+        view.evaluateJavascript(script) { raw ->
+            val currentRuntime = tabRuntimes[runtime.tabId]?.takeIf { it.webView === view }
+                ?: return@evaluateJavascript
+            val currentContext = currentRuntime.client.topLevelContextSnapshot()
+            if (adaptiveScope(currentContext.profile, currentContext.url) != scope) return@evaluateJavascript
+            val reports = parseAdaptiveDomAdReports(decodeJavascriptString(raw))
+            if (reports.isNotEmpty()) {
+                adaptiveShieldController.observeDomAdEvidence(profile, pageUrl, reports)
+                recordEvent(
+                    DebugEvent(
+                        category = DebugEventCategory.ADAPTIVE_OBSERVE,
+                        message = "[${profile.displayName}] Structured DOM ad evidence",
+                        detail = "scope=${scope.diagnosticName}, reports=${reports.size}",
+                    ),
+                )
+            }
+        }
+        if (followUpPolls > 0) {
+            view.postDelayed(
+                {
+                    if (tabRuntimes[runtime.tabId]?.webView === view) {
+                        injectAdaptiveAdObserver(view, followUpPolls = followUpPolls - 1)
+                    }
+                },
+                AD_OBSERVER_BATCH_WINDOW_MS,
+            )
+        }
+    }
+
     private fun showProfilePicker() {
         val profiles = SiteProfileRegistry.selectableProfiles()
         val labels = profiles.map { it.displayName }.toTypedArray()
@@ -1588,6 +1633,8 @@ class MainActivity : Activity() {
     companion object {
         private const val MAX_EVENTS = 200
         private const val DOM_LOG_PREFIX = "[SiteShield]"
+        private const val AD_OBSERVER_BATCH_WINDOW_MS = 1_000L
+        private const val AD_OBSERVER_FOLLOW_UP_POLLS = 3
     }
 }
 

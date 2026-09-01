@@ -42,7 +42,7 @@ class AdaptivePolicyTest {
     }
 
     @Test
-    fun `media classification is used only as protected functional evidence`() {
+    fun `media classification supports direct enforcement protection`() {
         assertEquals(
             AdaptiveResourceKind.IMAGE,
             adaptiveResourceKind(

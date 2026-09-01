@@ -32,7 +32,8 @@ class SharedPreferencesAdaptiveStatePersistence(context: Context) : AdaptiveStat
 }
 
 object AdaptiveStateCodec {
-    private const val VERSION = "v2"
+    private const val VERSION = "v3"
+    private const val PREVIOUS_VERSION = "v2"
     private const val FIELD_SEPARATOR = '\t'
 
     fun encode(records: List<AdaptiveRecord>): String = buildString {
@@ -62,6 +63,14 @@ object AdaptiveStateCodec {
                     record.score,
                     record.confidence,
                     record.siteScope.orEmpty(),
+                    record.adEvidence.explicitAdSlotCount,
+                    record.adEvidence.sponsoredAttributionCount,
+                    record.adEvidence.adIframeCorrelationCount,
+                    record.adEvidence.overlayAdCount,
+                    record.adEvidence.repeatedLoaderCorrelationCount,
+                    record.pathScoped,
+                    record.promotionReason.orEmpty(),
+                    record.safetyConflict.orEmpty(),
                 ).joinToString(FIELD_SEPARATOR.toString()),
             )
         }
@@ -70,13 +79,40 @@ object AdaptiveStateCodec {
     fun decode(serialized: String?): List<AdaptiveRecord> {
         if (serialized.isNullOrBlank()) return emptyList()
         val lines = serialized.lineSequence().toList()
-        if (lines.firstOrNull() != VERSION) return emptyList()
-        return lines.drop(1).mapNotNull(::decodeRecord)
+        return when (lines.firstOrNull()) {
+            VERSION -> lines.drop(1).mapNotNull(::decodeV3Record)
+            PREVIOUS_VERSION -> lines.drop(1).mapNotNull(::decodeV2Record)
+            else -> emptyList()
+        }
     }
 
-    private fun decodeRecord(line: String): AdaptiveRecord? = runCatching {
+    private fun decodeV3Record(line: String): AdaptiveRecord? = runCatching {
+        val fields = line.split(FIELD_SEPARATOR)
+        if (fields.size != 29) return null
+        val base = decodeBaseRecord(fields) ?: return null
+        val promotionReason = fields[27].validatedOptionalReason() ?: return null
+        val safetyConflict = fields[28].validatedOptionalReason() ?: return null
+        base.copy(
+            adEvidence = AdaptiveAdEvidence(
+                explicitAdSlotCount = fields[21].toEvidenceCount() ?: return null,
+                sponsoredAttributionCount = fields[22].toEvidenceCount() ?: return null,
+                adIframeCorrelationCount = fields[23].toEvidenceCount() ?: return null,
+                overlayAdCount = fields[24].toEvidenceCount() ?: return null,
+                repeatedLoaderCorrelationCount = fields[25].toEvidenceCount() ?: return null,
+            ),
+            pathScoped = fields[26].toBooleanStrict(),
+            promotionReason = promotionReason.takeIf(String::isNotBlank),
+            safetyConflict = safetyConflict.takeIf(String::isNotBlank),
+        )
+    }.getOrNull()
+
+    private fun decodeV2Record(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
         if (fields.size != 21) return null
+        decodeBaseRecord(fields)
+    }.getOrNull()
+
+    private fun decodeBaseRecord(fields: List<String>): AdaptiveRecord? {
         val profileId = fields[1].safeToken() ?: return null
         val host = fields[4].normalizedHost() ?: return null
         val path = fields[5].takeIf(String::isNotBlank)?.let(::sanitizeAdaptivePath)
@@ -86,7 +122,7 @@ object AdaptiveStateCodec {
             ?.takeIf { it.length <= 253 && it.matches(Regex("[a-z0-9.-]+")) }
         if (profileId == GenericWebProfile.profile.id && siteScope == null) return null
         if (profileId != GenericWebProfile.profile.id && siteScope != null) return null
-        AdaptiveRecord(
+        return AdaptiveRecord(
             id = fields[0].safeId() ?: return null,
             profileId = profileId,
             type = AdaptiveCandidateType.valueOf(fields[2]),
@@ -109,7 +145,7 @@ object AdaptiveStateCodec {
             confidence = fields[19].toInt().coerceIn(0, 100),
             siteScope = siteScope,
         )
-    }.getOrNull()
+    }
 
     private fun String.safeId(): String? =
         takeIf { length in 1..500 && none { char -> char == FIELD_SEPARATOR || char == '\n' || char == '\r' } }
@@ -117,8 +153,15 @@ object AdaptiveStateCodec {
     private fun String.safeToken(): String? =
         takeIf { length in 1..80 && matches(Regex("[a-zA-Z0-9._-]+")) }
 
+    private fun String.validatedOptionalReason(): String? =
+        if (isBlank()) "" else takeIf { length <= 80 && matches(Regex("[a-z0-9+_-]+")) }
+
+    private fun String.toEvidenceCount(): Int? = toIntOrNull()?.takeIf { it in 0..MAX_EVIDENCE_COUNT }
+
     private fun String.toNonNegativeInt(): Int = toInt().coerceAtLeast(0)
     private fun String.toNonNegativeLong(): Long = toLong().coerceAtLeast(0)
+
+    private const val MAX_EVIDENCE_COUNT = 10_000
 }
 
 class AdaptiveShieldController(
@@ -129,6 +172,16 @@ class AdaptiveShieldController(
     private val clock: AdaptiveClock = AdaptiveClock(System::currentTimeMillis),
     private val persistDelayMs: Long = 1_500L,
 ) : AutoCloseable {
+    private data class RecentRequest(
+        val scope: AdaptiveScope,
+        val host: String,
+        val path: String,
+        val blockedByStaticRule: Boolean,
+        val correlatedWithRedirect: Boolean,
+        val resourceKind: AdaptiveResourceKind,
+        val observedAtMs: Long,
+    )
+
     private val persistence = persistence
     private val mode = AtomicReference(initialMode)
     private val engine = AdaptiveShieldEngine(persistence.load())
@@ -137,6 +190,7 @@ class AdaptiveShieldController(
     }
     private val persistLock = Any()
     private var scheduledPersist: ScheduledFuture<*>? = null
+    private val recentRequests = ArrayDeque<RecentRequest>()
 
     fun mode(): AdaptiveShieldMode = mode.get()
 
@@ -173,17 +227,134 @@ class AdaptiveShieldController(
     ) {
         val scope = adaptiveScope(profile, pageUrl) ?: return
         val host = requestUrl.hostFromUrl() ?: return
+        val nowMs = clock.nowMs()
+        val path = sanitizeAdaptivePath(requestUrl.toUriOrNull()?.path)
+        val redirectEvidence = engine.hasRedirectEvidence(scope, host)
+        synchronized(recentRequests) {
+            recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
+            while (recentRequests.size >= MAX_RECENT_REQUESTS) recentRequests.removeFirst()
+            recentRequests.addLast(
+                RecentRequest(scope, host, path, blockedByStaticRule, redirectEvidence, resourceKind, nowMs),
+            )
+        }
         val observation = AdaptiveObservationFactory.request(
             profile = profile,
             pageUrl = pageUrl,
             requestUrl = requestUrl,
             blockedByStaticRule = blockedByStaticRule,
-            correlatedWithRedirect = engine.hasRedirectEvidence(scope, host),
+            correlatedWithRedirect = redirectEvidence,
             functionalEvidence = profile.adaptivePolicy.isFunctionalEvidence(host, resourceKind),
             resourceKind = resourceKind,
-            observedAtMs = clock.nowMs(),
+            observedAtMs = nowMs,
         ) ?: return
         record(observation, profile.adaptivePolicy)
+    }
+
+    fun observeDomAdEvidence(
+        profile: SiteProfile,
+        pageUrl: String?,
+        reports: List<AdaptiveDomAdReport>,
+    ) {
+        if (mode.get() == AdaptiveShieldMode.OFF || !profile.adaptivePolicy.enabled) return
+        val scope = adaptiveScope(profile, pageUrl) ?: return
+        val nowMs = clock.nowMs()
+        val batch = reports.take(MAX_DOM_REPORTS_PER_BATCH)
+        val hasReportedLoader = batch.any { it.role == AdaptiveAdResourceRole.LOADER }
+        val hasCorrelatedAdFrame = batch.any { report ->
+            report.role == AdaptiveAdResourceRole.IFRAME && synchronized(recentRequests) {
+                recentRequests.any {
+                    nowMs - it.observedAtMs <= DOM_CORRELATION_WINDOW_MS &&
+                        it.scope == scope && it.host == report.host && it.path == report.path
+                }
+            }
+        }
+        batch.forEach { report ->
+            if (report.role == AdaptiveAdResourceRole.STRUCTURE) {
+                record(
+                    AdaptiveAdObservation(
+                        profileId = profile.id,
+                        host = scope.siteScope ?: report.host,
+                        path = null,
+                        pageType = profile.pageTypeForAdaptive(pageUrl),
+                        observedAtMs = nowMs,
+                        evidence = report.evidence(),
+                        thirdParty = false,
+                        pathScoped = false,
+                        siteScope = scope.siteScope,
+                    ),
+                    profile.adaptivePolicy,
+                )
+                if (!hasReportedLoader && hasCorrelatedAdFrame) {
+                    inferSingleRecentLoader(scope, profile, report, nowMs)?.let { inferred ->
+                        record(inferred, profile.adaptivePolicy)
+                    }
+                }
+                return@forEach
+            }
+            val recent = synchronized(recentRequests) {
+                recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
+                recentRequests.lastOrNull {
+                    it.scope == scope && it.host == report.host && it.path == report.path
+                }
+            } ?: return@forEach
+            val functionalConflict = profile.adaptivePolicy.protectedHosts.any { it.matches(report.host) } ||
+                isAdaptiveAccountNavigation("https://${report.host}${report.path}")
+            record(
+                AdaptiveAdObservation(
+                    profileId = profile.id,
+                    host = report.host,
+                    path = report.path,
+                    pageType = profile.pageTypeForAdaptive(pageUrl),
+                    observedAtMs = nowMs,
+                    evidence = report.evidence(),
+                    thirdParty = report.host != scope.siteScope &&
+                        profile.allowedHosts.none { it.matches(report.host) },
+                    pathScoped = report.pathScoped || report.host == scope.siteScope,
+                    functionalConflict = functionalConflict,
+                    blockedByStaticRule = recent.blockedByStaticRule,
+                    correlatedWithRedirect = recent.correlatedWithRedirect,
+                    siteScope = scope.siteScope,
+                ),
+                profile.adaptivePolicy,
+            )
+        }
+    }
+
+    private fun inferSingleRecentLoader(
+        scope: AdaptiveScope,
+        profile: SiteProfile,
+        structure: AdaptiveDomAdReport,
+        nowMs: Long,
+    ): AdaptiveAdObservation? {
+        if (!structure.explicitAdSlot && !structure.sponsoredAttribution) return null
+        val scripts = synchronized(recentRequests) {
+            recentRequests.filter {
+                nowMs - it.observedAtMs <= DOM_CORRELATION_WINDOW_MS &&
+                    it.scope == scope && it.resourceKind == AdaptiveResourceKind.OTHER &&
+                    it.host != scope.siteScope && it.path.matches(Regex(".*\\.(m?js)$", RegexOption.IGNORE_CASE)) &&
+                    profile.adaptivePolicy.protectedHosts.none { pattern -> pattern.matches(it.host) }
+            }.distinctBy { "${it.host}${it.path}" }
+        }
+        val script = scripts.singleOrNull() ?: return null
+        return AdaptiveAdObservation(
+            profileId = profile.id,
+            host = script.host,
+            path = script.path,
+            pageType = profile.pageTypeForAdaptive(scope.siteScope?.let { "https://$it/" }),
+            observedAtMs = nowMs,
+            evidence = AdaptiveAdEvidence(
+                explicitAdSlotCount = if (structure.explicitAdSlot) 1 else 0,
+                sponsoredAttributionCount = if (structure.sponsoredAttribution) 1 else 0,
+                adIframeCorrelationCount = 1,
+                overlayAdCount = if (structure.overlayLayout) 1 else 0,
+                repeatedLoaderCorrelationCount = 1,
+            ),
+            thirdParty = true,
+            pathScoped = true,
+            blockedByStaticRule = script.blockedByStaticRule,
+            correlatedWithRedirect = script.correlatedWithRedirect,
+            siteScope = scope.siteScope,
+        )
     }
 
     fun decideRequest(
@@ -302,10 +473,22 @@ class AdaptiveShieldController(
     private fun persistNow() {
         persistence.save(engine.snapshot(clock.nowMs()))
     }
+
+    private companion object {
+        const val MAX_RECENT_REQUESTS = 128
+        const val MAX_DOM_REPORTS_PER_BATCH = 32
+        const val DOM_CORRELATION_WINDOW_MS = 20_000L
+    }
 }
 
 fun AdaptiveRecord.safeDiagnostic(): String =
     "scope=${scope().diagnosticName}, profile=$profileId, host=$host, type=$type, state=$state, " +
         "count=$occurrenceCount, confidence=$confidence, static=$staticBlockCount, " +
         "thirdParty=$thirdPartyCount, redirects=$redirectCorrelationCount, " +
-        "functional=$functionalEvidenceCount, ruleId=$id"
+        "adSlot=${adEvidence.explicitAdSlotCount}, sponsored=${adEvidence.sponsoredAttributionCount}, " +
+        "iframes=${adEvidence.adIframeCorrelationCount}, overlays=${adEvidence.overlayAdCount}, " +
+        "loaders=${adEvidence.repeatedLoaderCorrelationCount}, functional=$functionalEvidenceCount, " +
+        "promotion=${promotionReason ?: "none"}, safety=${safetyConflict ?: "none"}, ruleId=$id"
+
+private fun SiteProfile.pageTypeForAdaptive(url: String?): PageType =
+    pageTypeRules.firstOrNull { url != null && it.matches(url) }?.pageType ?: PageType.UNKNOWN

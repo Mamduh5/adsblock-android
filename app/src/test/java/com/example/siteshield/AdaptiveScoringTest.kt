@@ -66,7 +66,7 @@ class AdaptiveScoringTest {
     }
 
     @Test
-    fun `exact first party loader needs six repeats and nearby app script is ignored`() {
+    fun `exact first party loader needs six repeats and nearby app script does not create host trust`() {
         val engine = AdaptiveShieldEngine()
         val loaderUrl = "https://www.mangakakalot.gg/js/ads/new-loader-1234567890abcdef.js?token=secret"
         repeat(5) { index ->
@@ -113,7 +113,7 @@ class AdaptiveScoringTest {
                 observedAtMs = 7,
             )
         assertNotNull(functional)
-        assertEquals(true, functional?.functionalEvidence)
+        assertEquals(false, functional?.functionalEvidence)
     }
 
     @Test

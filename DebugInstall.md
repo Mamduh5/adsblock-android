@@ -55,6 +55,40 @@ Session URLs are local-only and preserve HTTPS query/fragment page identity whil
 
 DOM structural candidates remain review-only in v2; no DOM adaptive auto-enforcement is claimed. Mangakakalot retains its specialized reader health rollback. Generic Web intentionally has no speculative generic DOM-health rollback.
 
+## Adaptive Shield v3 ad-evidence physical test
+
+### Test A - unknown display ad
+
+1. In Generic Web, set Adaptive to LEARN and open a normal site with a display ad that static rules currently miss.
+2. Leave the ad visible and reload/browse enough for the same slot and loader or iframe relationship to occur at least three times.
+3. Open Adaptive Shield diagnostics. Verify the scoped candidate shows explicit-slot, sponsored, iframe, overlay, or loader evidence without exposing a query string or page text.
+4. Switch directly to AUTO_SAFE. Verify the qualified candidate changes to LEARNED without restarting the app and shows a promotion reason.
+5. Reload. Verify the learned ad loader, ad path, or ad iframe is blocked and the advertisement no longer loads while the article remains usable.
+
+### Test B - normal content safety
+
+1. On the same site, exercise ordinary images, fonts, an embedded video, navigation, login/session flows, and a user-confirmed download.
+2. Verify image/video/font requests are not directly Adaptive-blocked, explicit taps/navigation remain allowed, login/session infrastructure is not learned, and downloads still require native confirmation.
+
+### Test C - native or sponsored content
+
+1. Visit a page with a clearly attributed sponsored card and verify short exact attribution plus structural iframe/loader evidence appears.
+2. Visit an article discussing sponsored content. Verify prose or a heading alone does not create an enforceable candidate.
+3. Verify an uncertain native card can remain observed/candidate and does not auto-block from text or class names alone.
+
+### Test D - sticky or interstitial content
+
+1. Verify a fixed/sticky advertisement with attribution or an ad iframe records overlay evidence.
+2. Open a cookie/consent dialog, navigation overlay, video lightbox, and accessibility control where practical. Verify layout alone does not create ad evidence or a learned rule.
+
+### Test E - scope isolation
+
+1. Learn a qualified ad candidate on Generic Site A.
+2. Visit Generic Site B, preferably using the same third-party provider.
+3. Verify Site A's rule ID and enforcement remain under Site A's `AdaptiveScope` and do not automatically block Site B.
+
+Physical success requires visible before/after ad behavior and working main content; diagnostics or JVM tests alone are not physical acceptance.
+
 ## Downloads v1 physical test
 
 1. Serve or open a safe page containing a small PDF, image, and ZIP/text link.
