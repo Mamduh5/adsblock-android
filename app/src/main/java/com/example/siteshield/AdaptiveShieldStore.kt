@@ -43,23 +43,30 @@ class SharedPreferencesAdaptiveStatePersistence private constructor(
     internal constructor(preferences: AdaptivePreferenceStore, testOnly: Unit = Unit) : this(preferences)
 
     override fun load(): List<AdaptiveRecord> =
-        AdaptiveStateCodec.decode(preferences.getString(KEY_STATE_V3) ?: preferences.getString(KEY_STATE_LEGACY))
+        AdaptiveStateCodec.decode(
+            preferences.getString(KEY_STATE_V4)
+                ?: preferences.getString(KEY_STATE_V3)
+                ?: preferences.getString(KEY_STATE_LEGACY),
+        )
 
     override fun save(records: List<AdaptiveRecord>) {
-        if (preferences.putString(KEY_STATE_V3, AdaptiveStateCodec.encode(records))) {
+        if (preferences.putString(KEY_STATE_V4, AdaptiveStateCodec.encode(records))) {
+            preferences.remove(KEY_STATE_V3)
             preferences.remove(KEY_STATE_LEGACY)
         }
     }
 
     internal companion object {
+        const val KEY_STATE_V4 = "adaptive_state_v4"
         const val KEY_STATE_V3 = "adaptive_state_v3"
         const val KEY_STATE_LEGACY = "adaptive_state_v2"
     }
 }
 
 object AdaptiveStateCodec {
-    private const val VERSION = "v3"
-    private const val PREVIOUS_VERSION = "v2"
+    private const val VERSION = "v4"
+    private const val PREVIOUS_VERSION = "v3"
+    private const val LEGACY_VERSION = "v2"
     private const val FIELD_SEPARATOR = '\t'
 
     fun encode(records: List<AdaptiveRecord>): String = buildString {
@@ -97,6 +104,15 @@ object AdaptiveStateCodec {
                     record.pathScoped,
                     record.promotionReason.orEmpty(),
                     record.safetyConflict.orEmpty(),
+                    record.intentMismatchCount,
+                    record.protocolEvidence.placementCount,
+                    record.protocolEvidence.auctionCount,
+                    record.protocolEvidence.impressionCount,
+                    record.protocolEvidence.creativeCount,
+                    record.protocolEvidence.clickCount,
+                    record.protocolEvidence.popupCount,
+                    record.protocolEvidence.bidderCount,
+                    record.protocolEvidence.clusterCount,
                 ).joinToString(FIELD_SEPARATOR.toString()),
             )
         }
@@ -106,19 +122,43 @@ object AdaptiveStateCodec {
         if (serialized.isNullOrBlank()) return emptyList()
         val lines = serialized.lineSequence().toList()
         return when (lines.firstOrNull()) {
-            VERSION -> lines.drop(1).mapNotNull(::decodeV3Record)
-            PREVIOUS_VERSION -> lines.drop(1).mapNotNull(::decodeV2Record)
+            VERSION -> lines.drop(1).mapNotNull(::decodeV4Record)
+            PREVIOUS_VERSION -> lines.drop(1).mapNotNull(::decodeV3Record)
+            LEGACY_VERSION -> lines.drop(1).mapNotNull(::decodeV2Record)
             else -> emptyList()
         }
     }
 
+    private fun decodeV4Record(line: String): AdaptiveRecord? = runCatching {
+        val fields = line.split(FIELD_SEPARATOR)
+        if (fields.size != 38) return null
+        val base = decodeV3Fields(fields) ?: return null
+        base.copy(
+            intentMismatchCount = fields[29].toEvidenceCount() ?: return null,
+            protocolEvidence = AdaptiveProtocolEvidence(
+                placementCount = fields[30].toEvidenceCount() ?: return null,
+                auctionCount = fields[31].toEvidenceCount() ?: return null,
+                impressionCount = fields[32].toEvidenceCount() ?: return null,
+                creativeCount = fields[33].toEvidenceCount() ?: return null,
+                clickCount = fields[34].toEvidenceCount() ?: return null,
+                popupCount = fields[35].toEvidenceCount() ?: return null,
+                bidderCount = fields[36].toEvidenceCount() ?: return null,
+                clusterCount = fields[37].toEvidenceCount() ?: return null,
+            ),
+        )
+    }.getOrNull()
+
     private fun decodeV3Record(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
         if (fields.size != 29) return null
+        decodeV3Fields(fields)
+    }.getOrNull()
+
+    private fun decodeV3Fields(fields: List<String>): AdaptiveRecord? {
         val base = decodeBaseRecord(fields) ?: return null
         val promotionReason = fields[27].validatedOptionalReason() ?: return null
         val safetyConflict = fields[28].validatedOptionalReason() ?: return null
-        base.copy(
+        return base.copy(
             adEvidence = AdaptiveAdEvidence(
                 explicitAdSlotCount = fields[21].toEvidenceCount() ?: return null,
                 sponsoredAttributionCount = fields[22].toEvidenceCount() ?: return null,
@@ -130,7 +170,7 @@ object AdaptiveStateCodec {
             promotionReason = promotionReason.takeIf(String::isNotBlank),
             safetyConflict = safetyConflict.takeIf(String::isNotBlank),
         )
-    }.getOrNull()
+    }
 
     private fun decodeV2Record(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
@@ -217,6 +257,7 @@ class AdaptiveShieldController(
     private val persistLock = Any()
     private var scheduledPersist: ScheduledFuture<*>? = null
     private val recentRequests = ArrayDeque<RecentRequest>()
+    private val protocolCluster = AdaptiveRequestCluster()
 
     fun mode(): AdaptiveShieldMode = mode.get()
 
@@ -232,6 +273,7 @@ class AdaptiveShieldController(
         targetUrl: String,
         popup: Boolean,
         blockedBySourcePolicy: Boolean,
+        intentMismatch: Boolean = false,
     ) {
         val observation = AdaptiveObservationFactory.navigation(
             profile = profile,
@@ -239,6 +281,7 @@ class AdaptiveShieldController(
             targetUrl = targetUrl,
             popup = popup,
             blockedBySourcePolicy = blockedBySourcePolicy,
+            intentMismatch = intentMismatch,
             observedAtMs = clock.nowMs(),
         ) ?: return
         record(observation, profile.adaptivePolicy)
@@ -275,6 +318,43 @@ class AdaptiveShieldController(
             observedAtMs = nowMs,
         ) ?: return
         record(observation, profile.adaptivePolicy)
+        observeProtocol(profile, pageUrl, requestUrl, resourceKind, scope, host, nowMs)
+    }
+
+    private fun observeProtocol(
+        profile: SiteProfile,
+        pageUrl: String?,
+        requestUrl: String,
+        resourceKind: AdaptiveResourceKind,
+        scope: AdaptiveScope,
+        host: String,
+        nowMs: Long,
+    ) {
+        val firstParty = host == scope.siteScope || profile.allowedHosts.any { it.matches(host) }
+        if (firstParty) return
+        val classification = AdaptiveProtocolClassifier.classify(requestUrl, resourceKind) ?: return
+        val clusterCount = protocolCluster.observe(
+            AdaptiveRequestCluster.Event(scope, host, classification.evidence.categories, nowMs),
+        )
+        val evidence = classification.evidence.withCluster(clusterCount)
+        val conflict = profile.adaptivePolicy.protectedHosts.any { it.matches(host) } ||
+            isAdaptiveAccountNavigation("https://$host${classification.normalizedPath}")
+        fun protocolObservation(path: String?, pathScoped: Boolean) = AdaptiveProtocolObservation(
+            profileId = profile.id,
+            host = host,
+            path = path,
+            pageType = profile.pageTypeForAdaptive(pageUrl),
+            observedAtMs = nowMs,
+            evidence = evidence,
+            thirdParty = true,
+            pathScoped = pathScoped,
+            functionalConflict = conflict,
+            siteScope = scope.siteScope,
+        )
+        record(protocolObservation(null, false), profile.adaptivePolicy)
+        if (classification.pathScoped && classification.normalizedPath != "/") {
+            record(protocolObservation(classification.normalizedPath, true), profile.adaptivePolicy)
+        }
     }
 
     fun observeDomAdEvidence(
@@ -569,6 +649,11 @@ fun AdaptiveRecord.safeDiagnostic(): String =
         "adSlot=${adEvidence.explicitAdSlotCount}, sponsored=${adEvidence.sponsoredAttributionCount}, " +
         "iframes=${adEvidence.adIframeCorrelationCount}, overlays=${adEvidence.overlayAdCount}, " +
         "loaders=${adEvidence.repeatedLoaderCorrelationCount}, functional=$functionalEvidenceCount, " +
+        "protocolPlacement=${protocolEvidence.placementCount}, protocolAuction=${protocolEvidence.auctionCount}, " +
+        "protocolImpression=${protocolEvidence.impressionCount}, protocolCreative=${protocolEvidence.creativeCount}, " +
+        "protocolClick=${protocolEvidence.clickCount}, protocolPopup=${protocolEvidence.popupCount}, " +
+        "protocolBidder=${protocolEvidence.bidderCount}, clusterEvents=${protocolEvidence.clusterCount}, " +
+        "intentMismatch=$intentMismatchCount, popupEvidence=$popupCount, " +
         "promotion=${promotionReason ?: "none"}, safety=${safetyConflict ?: "none"}, ruleId=$id"
 
 private fun SiteProfile.pageTypeForAdaptive(url: String?): PageType =

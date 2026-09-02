@@ -103,6 +103,30 @@ Physical success requires visible before/after ad behavior and working main cont
 
 Late-ad acceptance requires real evidence appearing after the old three-second window. JVM lifecycle/correlation tests do not replace this physical check.
 
+## Adaptive Shield v3.2 protocol and navigation-intent test
+
+### ArenaScan protocol fixture acceptance
+
+1. In Generic Web, open `arenascan.com`, open Adaptive Shield, and forget only the `arenascan.com` scope.
+2. Set Adaptive to LEARN and Blocker to OFF. Browse, search, and read until the same type of advertising popup/redirect behavior occurs. LEARN must observe but must not block.
+3. Review the scoped diagnostics. Verify relevant candidates show non-zero protocol placement, auction/bidder, impression/creative/click/popup, and cluster counts where the burst qualifies. Full queries, parameter values, campaign IDs, click IDs, publisher IDs, and link text must not appear.
+4. Tap an ordinary non-link element that triggers an unrelated offsite popup or redirect. Verify `intent=CLICK_HIJACK_SUSPECTED` / `intentMismatch` evidence appears even though WebView reports a gesture.
+5. Tap a real same-site link, a real external link, and a legitimate `target=_blank` link. Verify exact normalized host/path matches are treated as `PAGE_LINK_INTENDED` and continue to work. Also verify Back/Forward, Browse Home, omnibox navigation, login/OAuth, account/session pages, payments, and downloads.
+6. Switch Blocker to ON and Adaptive to AUTO_SAFE, then reload and repeat the browsing flow.
+7. Verify only qualified learned protocol infrastructure is blocked, unrelated learned popups/redirects are blocked, captured intended destinations still work, and main content remains functional.
+
+The implementation is generic: acceptance must not depend on hardcoded ArenaScan or observed provider domains. A lone third-party request, repeated analytics request, or one suspicious parameter must remain insufficient for promotion.
+
+### Blocked-ad placeholder acceptance
+
+1. Open the movie site where a blocked advertisement previously left an empty box. Enable Blocker and AUTO_SAFE.
+2. Verify the network log first proves the iframe/script resource was blocked by a static or learned Adaptive rule.
+3. Verify the correlated iframe/script is hidden and the smallest empty ad-identified wrapper collapses.
+4. Verify a visually empty normal layout container remains. Also verify nearby article text, reader content, images, video/audio/canvas, player controls, forms, buttons, navigation links, login controls, and profile preservation selectors remain intact.
+5. Wait for a dynamically inserted or refreshed ad frame and verify bounded mutation cleanup collapses its correlated placeholder without a continuous full-document scan.
+
+Physical success requires the real ArenaScan and movie-site before/after behavior. The deterministic JVM/JavaScript fixtures do not replace device acceptance.
+
 ## Downloads v1 physical test
 
 1. Serve or open a safe page containing a small PDF, image, and ZIP/text link.

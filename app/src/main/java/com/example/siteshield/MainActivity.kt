@@ -64,6 +64,12 @@ class MainActivity : Activity() {
     private val adaptiveObserverScript: String by lazy {
         assets.open("dom_ad_observer.js").bufferedReader().use { it.readText() }
     }
+    private val navigationIntentScript: String by lazy {
+        assets.open("navigation_intent_observer.js").bufferedReader().use { it.readText() }
+    }
+    private val blockedResourceFeedbackScript: String by lazy {
+        assets.open("blocked_resource_feedback.js").bufferedReader().use { it.readText() }
+    }
     private lateinit var activeProfile: SiteProfile
     private lateinit var webView: WebView
     private lateinit var webViewClient: SiteShieldWebViewClient
@@ -582,12 +588,18 @@ class MainActivity : Activity() {
                 injectDomCleanup(view)
             },
             onAdaptiveResourceActivity = { signalAdaptiveResourceActivity(tab.id) },
+            onBlockedResource = { evidence ->
+                runOnUiThread { applyBlockedResourceFeedback(tab.id, evidence) }
+            },
             onPageUsageCheckpoint = ::updateDataUsageReadout,
             onTopLevelNavigationStarted = { matched, url ->
                 onTabNavigationStarted(tab.id, tabWebView, matched, url)
             },
             onRendererGone = { onTabRendererGone(tab.id) },
-            onPageReady = { restorePendingScroll(tab.id) },
+            onPageReady = { view ->
+                injectNavigationIntentObserver(runtime, view)
+                restorePendingScroll(tab.id)
+            },
         )
         runtime = TabRuntime(tab.id, tabWebView, client, tracker)
         tabWebView.webViewClient = client
@@ -632,6 +644,18 @@ class MainActivity : Activity() {
 
         override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
             val message = consoleMessage.message()
+            if (message.startsWith(INTENT_LOG_PREFIX)) {
+                if (runtime.client.observeNavigationIntentMessage(message)) {
+                    recordEvent(
+                        DebugEvent(
+                            DebugEventCategory.POLICY_DECISION,
+                            "Captured page link navigation intent",
+                            "tab=${runtime.tabId}, queryStored=false, textStored=false",
+                        ),
+                    )
+                }
+                return true
+            }
             if (!message.startsWith(DOM_LOG_PREFIX)) return super.onConsoleMessage(consoleMessage)
             recordEvent(DebugEvent(DebugEventCategory.DOM_CLEANUP, message.removePrefix(DOM_LOG_PREFIX).trim()))
             return true
@@ -1139,6 +1163,14 @@ class MainActivity : Activity() {
                     "Ad iframe: ${record.adEvidence.adIframeCorrelationCount}  " +
                     "Overlay: ${record.adEvidence.overlayAdCount}  " +
                     "Loader: ${record.adEvidence.repeatedLoaderCorrelationCount}\n" +
+                    "Protocol placement: ${record.protocolEvidence.placementCount}  " +
+                    "auction: ${record.protocolEvidence.auctionCount}  " +
+                    "impression: ${record.protocolEvidence.impressionCount}\n" +
+                    "Protocol creative: ${record.protocolEvidence.creativeCount}  " +
+                    "click: ${record.protocolEvidence.clickCount}  popup: ${record.protocolEvidence.popupCount}\n" +
+                    "Protocol bidder: ${record.protocolEvidence.bidderCount}  " +
+                    "cluster: ${record.protocolEvidence.clusterCount}  " +
+                    "intent mismatch: ${record.intentMismatchCount}\n" +
                     "Promotion: ${record.promotionReason ?: "not eligible"}  " +
                     "Safety: ${record.safetyConflict ?: "none"}\n" +
                     "Path: ${record.path ?: "host only"}\nRule: ${record.id}",
@@ -1160,6 +1192,8 @@ class MainActivity : Activity() {
             AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> "Third-party request"
             AdaptiveCandidateType.FIRST_PARTY_LOADER -> "Loader"
             AdaptiveCandidateType.AD_RESOURCE -> if (record.pathScoped) "Ad resource path" else "Ad resource host"
+            AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE ->
+                if (record.pathScoped) "Ad protocol path" else "Ad protocol host"
             AdaptiveCandidateType.DOM_STRUCTURE -> "DOM candidate (review only)"
         }
         return "${record.state}: ${record.host}\n$kind · Seen ${record.occurrenceCount} · Confidence ${record.confidence}"
@@ -1463,6 +1497,39 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun injectNavigationIntentObserver(runtime: TabRuntime, view: WebView) {
+        if (runtime.webView !== view) return
+        val generation = runtime.client.navigationIntentGeneration()
+        val token = runtime.client.navigationIntentChannelToken()
+        val script = "window.__siteShieldIntentGeneration=$generation;" +
+            "window.__siteShieldIntentChannelToken=\"$token\";\n$navigationIntentScript"
+        view.evaluateJavascript(script, null)
+    }
+
+    private fun applyBlockedResourceFeedback(tabId: String, evidence: BlockedResourceEvidence) {
+        val runtime = tabRuntimes[tabId] ?: return
+        val context = runtime.client.topLevelContextSnapshot()
+        val currentScope = (runtime.webView.url ?: context.url)?.hostFromUrl() ?: return
+        if (currentScope != evidence.siteScope) return
+        val pageUrl = runtime.webView.url ?: context.url ?: return
+        val preserveSelectors = blockerEngine.domRulesForUrl(context.profile, pageUrl).preserveSelectors
+        val script = "window.__siteShieldBlockedResourceEvidence=${evidence.toJavascriptObject()};" +
+            "window.__siteShieldBlockedFeedbackConfig={preserveSelectors:${preserveSelectors.toJavascriptArray()}};\n" +
+            blockedResourceFeedbackScript
+        runtime.webView.evaluateJavascript(script) { raw ->
+            val result = decodeJavascriptString(raw)
+            if (result.contains("collapsed=") && !result.endsWith("collapsed=0")) {
+                recordEvent(
+                    DebugEvent(
+                        DebugEventCategory.DOM_CLEANUP,
+                        "Collapsed proven blocked-ad placeholder",
+                        "host=${evidence.host}, path=${evidence.path}, kind=${evidence.resourceKind}, $result",
+                    ),
+                )
+            }
+        }
+    }
+
     private fun startAdaptiveObservation(tabId: String, view: WebView) {
         if (!AdaptiveRuntimeModePolicy.observes(adaptiveShieldController.mode())) return
         if (tabRuntimes[tabId]?.webView !== view || browserAttachment.attachedTabId != tabId) return
@@ -1731,6 +1798,7 @@ class MainActivity : Activity() {
     companion object {
         private const val MAX_EVENTS = 200
         private const val DOM_LOG_PREFIX = "[SiteShield]"
+        private const val INTENT_LOG_PREFIX = "[SiteShieldIntent]"
         private const val ADAPTIVE_RESOURCE_DEBOUNCE_MS = 350L
         private const val ADAPTIVE_PENDING_DRAIN_MS = 50L
         private const val ADAPTIVE_ACTIVE_FALLBACK_MS = 15_000L

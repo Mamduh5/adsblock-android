@@ -26,11 +26,13 @@ class SiteShieldWebViewClient(
     private val onAdaptivePageReady: (WebView) -> Unit,
     private val onStaticCleanupRequested: (WebView) -> Unit,
     private val onAdaptiveResourceActivity: () -> Unit,
+    private val onBlockedResource: (BlockedResourceEvidence) -> Unit,
     private val onPageUsageCheckpoint: () -> Unit,
     private val onTopLevelNavigationStarted: (SiteProfile, String?) -> Unit,
     private val onRendererGone: () -> Unit = {},
     private val onPageReady: (WebView) -> Unit = {},
 ) : WebViewClient() {
+    private val navigationIntentTracker = NavigationIntentTracker()
     private val profileHistory = TopLevelProfileHistory()
     private val topLevelContext = TopLevelContextStore(
         TopLevelContext(
@@ -48,6 +50,7 @@ class SiteShieldWebViewClient(
      * There is no reusable intent flag: the destination profile is resolved and installed atomically.
      */
     fun prepareExplicitNavigation(url: String): SiteProfile {
+        navigationIntentTracker.prepareAppOwned(url)
         val profile = blockerEngine.profileForExplicitNavigation(url)
         replaceTopLevelContext(url, profile)
         return profile
@@ -55,6 +58,7 @@ class SiteShieldWebViewClient(
 
     /** Restores the profile recorded for exactly the WebView history entry being traversed. */
     fun prepareHistoryNavigation(url: String): SiteProfile {
+        navigationIntentTracker.prepareAppOwned(url)
         val profile = profileHistory.profileFor(url)
             ?: blockerEngine.profileForExplicitNavigation(url)
         replaceTopLevelContext(url, profile)
@@ -63,6 +67,16 @@ class SiteShieldWebViewClient(
 
     /** Captures popup ownership before the transient new-window WebView resolves its destination. */
     fun topLevelContextSnapshot(): TopLevelContext = topLevelContext.snapshot()
+
+    fun navigationIntentGeneration(): Long = navigationIntentTracker.generation()
+    fun navigationIntentChannelToken(): String = navigationIntentTracker.channelToken()
+
+    fun observeNavigationIntentMessage(message: String): Boolean {
+        val parsed = NavigationIntentMessage.parse(message) ?: return false
+        return navigationIntentTracker.record(
+            parsed.generation, parsed.token, parsed.host, parsed.path, parsed.targetBlank,
+        )
+    }
 
     /**
      * Applies the source page's policy before a popup target can be treated as explicit browsing.
@@ -73,18 +87,20 @@ class SiteShieldWebViewClient(
         targetUrl: String,
         hasUserGesture: Boolean,
     ): Boolean {
+        val intent = navigationIntentTracker.resolve(targetUrl, hasUserGesture, popup = true)
         val target = targetUrl.toUriOrNull()
         val sourcePageType = blockerEngine.classifyPageType(sourceContext.profile, sourceContext.url)
         val decision = blockerEngine.popupNavigationDecision(
             sourceProfile = sourceContext.profile,
             targetUrl = targetUrl,
             sourcePageUrl = sourceContext.url,
-            hasUserGesture = hasUserGesture,
+            hasUserGesture = intent.trusted,
             blockerEnabled = settingsStore.blockerEnabled,
         )
         val diagnostic = "sourceProfile=${sourceContext.profile.id}, sourcePageType=$sourcePageType, " +
             "targetScheme=${target?.scheme ?: "invalid"}, targetHost=${target?.host ?: "invalid"}, " +
-            "hasGesture=$hasUserGesture, onCreateWindow=true, actionView=false"
+            "hasGesture=$hasUserGesture, intent=${intent.category}, intended=${intent.trusted}, " +
+            "onCreateWindow=true, actionView=false"
 
         return when (decision) {
             is BlockDecision.Block -> {
@@ -94,6 +110,7 @@ class SiteShieldWebViewClient(
                     targetUrl = targetUrl,
                     popup = true,
                     blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
+                    intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
                 )
                 onEvent(
                     DebugEvent(
@@ -123,12 +140,13 @@ class SiteShieldWebViewClient(
                     targetUrl = targetUrl,
                     popup = true,
                     blockedBySourcePolicy = false,
+                    intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
                 )
                 val adaptiveDecision = adaptiveShieldController.decideNavigation(
                     profile = sourceContext.profile,
                     sourceUrl = sourceContext.url,
                     targetUrl = targetUrl,
-                    userInitiated = false,
+                    userInitiated = intent.trusted,
                     blockerEnabled = settingsStore.blockerEnabled,
                 )
                 if (adaptiveDecision is AdaptiveDecision.Block) {
@@ -167,7 +185,13 @@ class SiteShieldWebViewClient(
         val currentPageUrl = activeContext.url
         val adaptiveProfile = activeContext.profile
         val decision = blockerEngine.navigationDecision(profile, url, currentPageUrl, request.isForMainFrame)
-        val userInitiated = request.hasGesture()
+        val intent = if (request.isForMainFrame) {
+            navigationIntentTracker.resolve(url, request.hasGesture(), popup = false)
+        } else {
+            NavigationIntentResult(NavigationIntentCategory.PAGE_DRIVEN, false)
+        }
+        val userInitiated = intent.trusted
+        val intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED
         if (!settingsStore.blockerEnabled) {
             if (request.isForMainFrame && !userInitiated) {
                 adaptiveShieldController.observeNavigation(
@@ -176,6 +200,7 @@ class SiteShieldWebViewClient(
                     targetUrl = url,
                     popup = false,
                     blockedBySourcePolicy = false,
+                    intentMismatch = intentMismatch,
                 )
             }
             return false
@@ -190,6 +215,7 @@ class SiteShieldWebViewClient(
                         targetUrl = url,
                         popup = false,
                         blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
+                        intentMismatch = intentMismatch,
                     )
                 }
                 val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
@@ -220,6 +246,7 @@ class SiteShieldWebViewClient(
                 targetUrl = url,
                 popup = false,
                 blockedBySourcePolicy = false,
+                intentMismatch = intentMismatch,
             )
             val adaptiveDecision = adaptiveShieldController.decideNavigation(
                 profile = adaptiveProfile,
@@ -234,7 +261,8 @@ class SiteShieldWebViewClient(
                         category = DebugEventCategory.ADAPTIVE_BLOCK,
                         message = "[${profile.displayName}] Adaptive rule blocked page-driven navigation",
                         detail = "ruleId=${adaptiveDecision.ruleId}, confidence=${adaptiveDecision.confidence}, " +
-                            "type=${adaptiveDecision.type}, targetScheme=${uri.scheme}, targetHost=${uri.host}",
+                            "type=${adaptiveDecision.type}, intent=${intent.category}, " +
+                            "targetScheme=${uri.scheme}, targetHost=${uri.host}",
                     ),
                 )
                 return true
@@ -305,6 +333,8 @@ class SiteShieldWebViewClient(
                         "ruleId=${decision.ruleId ?: "none"}, targetScheme=${uri.scheme}, targetHost=${uri.host}",
                 ),
             )
+            BlockedResourceEvidence.from(activeContext.url, requestUrl, resourceKind, System.currentTimeMillis())
+                ?.let(onBlockedResource)
             return emptyResponse()
         }
         val adaptiveDecision = adaptiveShieldController.decideRequest(
@@ -327,6 +357,8 @@ class SiteShieldWebViewClient(
                     "targetScheme=${uri.scheme}, targetHost=${uri.host}",
             ),
         )
+        BlockedResourceEvidence.from(activeContext.url, requestUrl, resourceKind, System.currentTimeMillis())
+            ?.let(onBlockedResource)
         return emptyResponse()
     }
 
@@ -341,6 +373,7 @@ class SiteShieldWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        navigationIntentTracker.documentStarted()
         val updatedContext = updateTopLevelContext(url)
         val profile = updatedContext.profile
         val pageType = blockerEngine.classifyPageType(profile, updatedContext.url)
@@ -388,6 +421,7 @@ class SiteShieldWebViewClient(
         val previousContext = topLevelContext.snapshot()
         if (!isNewTopLevelHistoryUrl(previousContext.url, url)) return
 
+        navigationIntentTracker.documentStarted()
         val updatedContext = updateTopLevelContext(url)
         val pageType = blockerEngine.classifyPageType(updatedContext.profile, updatedContext.url)
         onTopLevelNavigationStarted(updatedContext.profile, updatedContext.url)
@@ -409,6 +443,7 @@ class SiteShieldWebViewClient(
         if (AdaptiveRuntimeModePolicy.performsStaticCleanup(settingsStore.blockerEnabled)) {
             onStaticCleanupRequested(view)
         }
+        onPageReady(view)
         onPageUsageCheckpoint()
     }
 

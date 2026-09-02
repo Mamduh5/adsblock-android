@@ -23,6 +23,7 @@ enum class AdaptiveCandidateType {
     THIRD_PARTY_REQUEST_HOST,
     FIRST_PARTY_LOADER,
     AD_RESOURCE,
+    NETWORK_PROTOCOL_AD_EVIDENCE,
     DOM_STRUCTURE,
 }
 
@@ -120,6 +121,16 @@ data class AdaptiveLearningConfig(
     val repeatedLoaderCorrelationWeight: Int = 75,
     val adResourceAutoThreshold: Int = 280,
     val adResourceAutoMinimumOccurrences: Int = 3,
+    val protocolAutoThreshold: Int = 420,
+    val protocolAutoMinimumOccurrences: Int = 6,
+    val protocolPlacementWeight: Int = 25,
+    val protocolAuctionWeight: Int = 45,
+    val protocolImpressionWeight: Int = 35,
+    val protocolCreativeWeight: Int = 30,
+    val protocolClickWeight: Int = 25,
+    val protocolPopupWeight: Int = 65,
+    val protocolBidderWeight: Int = 40,
+    val protocolClusterWeight: Int = 45,
     val firstPartyPenalty: Int = 15,
     val functionalEvidencePenalty: Int = 80,
     val candidateExpiryMs: Long = 14L * DAY_MS,
@@ -135,6 +146,7 @@ data class AdaptiveLearningConfig(
         require(thirdPartyAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(loaderAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(adResourceAutoMinimumOccurrences >= candidateMinimumOccurrences)
+        require(protocolAutoMinimumOccurrences >= candidateMinimumOccurrences)
         require(candidateExpiryMs > 0 && learnedDormancyMs > candidateExpiryMs)
         require(learnedRetirementMs > learnedDormancyMs)
         require(maxCandidatesPerProfile > 0 && maxLearnedRulesPerProfile > 0)
@@ -161,6 +173,7 @@ data class AdaptiveNavigationObservation(
     override val observedAtMs: Long,
     val popup: Boolean,
     val blockedBySourcePolicy: Boolean,
+    val intentMismatch: Boolean = false,
     override val path: String? = null,
     override val siteScope: String? = null,
 ) : AdaptiveObservation
@@ -205,6 +218,19 @@ data class AdaptiveAdObservation(
     override val siteScope: String? = null,
 ) : AdaptiveObservation
 
+data class AdaptiveProtocolObservation(
+    override val profileId: String,
+    override val host: String,
+    override val path: String?,
+    override val pageType: PageType,
+    override val observedAtMs: Long,
+    val evidence: AdaptiveProtocolEvidence,
+    val thirdParty: Boolean,
+    val pathScoped: Boolean,
+    val functionalConflict: Boolean = false,
+    override val siteScope: String? = null,
+) : AdaptiveObservation
+
 data class AdaptiveRecord(
     val id: String,
     val profileId: String,
@@ -231,6 +257,8 @@ data class AdaptiveRecord(
     val pathScoped: Boolean = false,
     val promotionReason: String? = null,
     val safetyConflict: String? = null,
+    val intentMismatchCount: Int = 0,
+    val protocolEvidence: AdaptiveProtocolEvidence = AdaptiveProtocolEvidence(),
 )
 
 sealed interface AdaptiveDecision {
@@ -296,6 +324,9 @@ class AdaptiveShieldEngine(
             AdaptiveCandidateType.FIRST_PARTY_LOADER -> observation.path
             AdaptiveCandidateType.AD_RESOURCE -> observation.path?.takeIf {
                 (observation as AdaptiveAdObservation).pathScoped
+            }
+            AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE -> observation.path?.takeIf {
+                (observation as AdaptiveProtocolObservation).pathScoped
             }
             AdaptiveCandidateType.DOM_STRUCTURE ->
                 (observation as AdaptiveDomObservation).fingerprint.safeDomFingerprint()
@@ -418,11 +449,14 @@ class AdaptiveShieldEngine(
                     AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
                     AdaptiveCandidateType.FIRST_PARTY_LOADER,
                     AdaptiveCandidateType.AD_RESOURCE,
+                    AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE,
                 ) &&
                 record.host == host &&
                 when (record.type) {
                     AdaptiveCandidateType.FIRST_PARTY_LOADER -> record.path == path
                     AdaptiveCandidateType.AD_RESOURCE -> record.path == null || path.startsWith(record.path)
+                    AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE ->
+                        record.path == null || path.startsWith(record.path)
                     AdaptiveCandidateType.DOM_STRUCTURE -> false
                     else -> true
                 }
@@ -599,8 +633,23 @@ class AdaptiveShieldEngine(
                     record.occurrenceCount >= config.loaderAutoMinimumOccurrences &&
                     record.score >= config.loaderAutoThreshold
             AdaptiveCandidateType.AD_RESOURCE -> adResourceEligible(record)
+            AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE -> protocolEligible(record)
             AdaptiveCandidateType.DOM_STRUCTURE -> false
         }
+    }
+
+    private fun protocolEligible(record: AdaptiveRecord): Boolean {
+        val evidence = record.protocolEvidence
+        val exchange = evidence.auctionCount >= 2 || evidence.bidderCount >= 2
+        val outcome = evidence.popupCount >= 2 ||
+            evidence.impressionCount + evidence.creativeCount + evidence.clickCount >= 3
+        val minimumPlacement = if (record.pathScoped) 2 else 3
+        val minimumCluster = if (record.pathScoped) 2 else 3
+        return record.occurrenceCount >= config.protocolAutoMinimumOccurrences &&
+            record.score >= config.protocolAutoThreshold &&
+            record.thirdPartyCount == record.occurrenceCount &&
+            evidence.placementCount >= minimumPlacement && exchange && outcome &&
+            evidence.clusterCount >= minimumCluster
     }
 
     private fun adResourceEligible(record: AdaptiveRecord): Boolean {
@@ -629,6 +678,9 @@ class AdaptiveShieldEngine(
             record.adEvidence.overlayAdCount >= 2 -> "overlay-ad+iframe-correlation"
             else -> null
         }
+        AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE ->
+            if (record.protocolEvidence.popupCount >= 2) "protocol-auction+popup-cluster"
+            else "protocol-auction+delivery-cluster"
         AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> when {
             record.staticBlockCount >= 3 -> "static-block-evidence"
             record.redirectCorrelationCount >= 2 -> "redirect-correlation"
@@ -662,6 +714,16 @@ class AdaptiveShieldEngine(
                     record.staticBlockCount.toLong() * config.staticRequestBlockWeight +
                     record.redirectCorrelationCount.toLong() * config.correlatedRedirectWeight
             }
+            AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE -> with(record.protocolEvidence) {
+                placementCount.toLong() * config.protocolPlacementWeight +
+                    auctionCount.toLong() * config.protocolAuctionWeight +
+                    impressionCount.toLong() * config.protocolImpressionWeight +
+                    creativeCount.toLong() * config.protocolCreativeWeight +
+                    clickCount.toLong() * config.protocolClickWeight +
+                    popupCount.toLong() * config.protocolPopupWeight +
+                    bidderCount.toLong() * config.protocolBidderWeight +
+                    clusterCount.toLong() * config.protocolClusterWeight
+            }
             AdaptiveCandidateType.DOM_STRUCTURE ->
                 record.occurrenceCount.toLong() * config.domObservationWeight
         }
@@ -678,6 +740,7 @@ class AdaptiveShieldEngine(
         AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST -> config.thirdPartyAutoThreshold
         AdaptiveCandidateType.FIRST_PARTY_LOADER -> config.loaderAutoThreshold
         AdaptiveCandidateType.AD_RESOURCE -> config.adResourceAutoThreshold
+        AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE -> config.protocolAutoThreshold
         AdaptiveCandidateType.DOM_STRUCTURE -> Int.MAX_VALUE
     }
 
@@ -700,6 +763,7 @@ class AdaptiveShieldEngine(
             occurrenceCount = occurrenceCount + 1,
             popupCount = popupCount + if (observation.popup) 1 else 0,
             sourcePolicyBlockCount = sourcePolicyBlockCount + if (observation.blockedBySourcePolicy) 1 else 0,
+            intentMismatchCount = intentMismatchCount + if (observation.intentMismatch) 1 else 0,
             lastSeenAtMs = observation.observedAtMs,
         )
         is AdaptiveRequestObservation -> copy(
@@ -734,6 +798,24 @@ class AdaptiveShieldEngine(
             safetyConflict = if (observation.functionalConflict) "functional-conflict" else safetyConflict,
             lastSeenAtMs = observation.observedAtMs,
         )
+        is AdaptiveProtocolObservation -> copy(
+            occurrenceCount = occurrenceCount + 1,
+            thirdPartyCount = thirdPartyCount + if (observation.thirdParty) 1 else 0,
+            functionalEvidenceCount = functionalEvidenceCount + if (observation.functionalConflict) 1 else 0,
+            protocolEvidence = AdaptiveProtocolEvidence(
+                placementCount = protocolEvidence.placementCount + observation.evidence.placementCount,
+                auctionCount = protocolEvidence.auctionCount + observation.evidence.auctionCount,
+                impressionCount = protocolEvidence.impressionCount + observation.evidence.impressionCount,
+                creativeCount = protocolEvidence.creativeCount + observation.evidence.creativeCount,
+                clickCount = protocolEvidence.clickCount + observation.evidence.clickCount,
+                popupCount = protocolEvidence.popupCount + observation.evidence.popupCount,
+                bidderCount = protocolEvidence.bidderCount + observation.evidence.bidderCount,
+                clusterCount = protocolEvidence.clusterCount + observation.evidence.clusterCount,
+            ),
+            pathScoped = pathScoped || observation.pathScoped,
+            safetyConflict = if (observation.functionalConflict) "functional-conflict" else safetyConflict,
+            lastSeenAtMs = observation.observedAtMs,
+        )
     }
 }
 
@@ -744,6 +826,7 @@ object AdaptiveObservationFactory {
         targetUrl: String,
         popup: Boolean,
         blockedBySourcePolicy: Boolean,
+        intentMismatch: Boolean = false,
         observedAtMs: Long,
     ): AdaptiveNavigationObservation? {
         if (!profile.adaptivePolicy.enabled || !profile.adaptivePolicy.observeOffsiteNavigations) return null
@@ -759,6 +842,7 @@ object AdaptiveObservationFactory {
             observedAtMs = observedAtMs,
             popup = popup,
             blockedBySourcePolicy = blockedBySourcePolicy,
+            intentMismatch = intentMismatch,
             siteScope = scope.siteScope,
         )
     }
@@ -857,6 +941,7 @@ private fun AdaptiveObservation.candidateType(): AdaptiveCandidateType = when (t
     is AdaptiveRequestObservation ->
         if (loaderPath) AdaptiveCandidateType.FIRST_PARTY_LOADER else AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST
     is AdaptiveAdObservation -> AdaptiveCandidateType.AD_RESOURCE
+    is AdaptiveProtocolObservation -> AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE
     is AdaptiveDomObservation -> AdaptiveCandidateType.DOM_STRUCTURE
 }
 
@@ -865,6 +950,7 @@ private fun AdaptiveCandidateType.riskTier(): AdaptiveRiskTier = when (this) {
     AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
     AdaptiveCandidateType.FIRST_PARTY_LOADER,
     AdaptiveCandidateType.AD_RESOURCE,
+    AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE,
     -> AdaptiveRiskTier.MEDIUM_RISK
     AdaptiveCandidateType.DOM_STRUCTURE -> AdaptiveRiskTier.HIGH_RISK
 }
