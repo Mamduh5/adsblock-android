@@ -127,6 +127,21 @@ The implementation is generic: acceptance must not depend on hardcoded ArenaScan
 
 Physical success requires the real ArenaScan and movie-site before/after behavior. The deterministic JVM/JavaScript fixtures do not replace device acceptance.
 
+## Adaptive Shield v3.3 host-evidence and cross-host cluster test
+
+1. In Generic Web, open Adaptive Shield for `arenascan.com` and forget only that site scope.
+2. Set Adaptive to LEARN and Blocker to OFF.
+3. Load, reload, search, and browse ArenaScan enough for the advertising stack to initialize across at least three separate page generations.
+4. Inspect `Adaptive network classifier` events and scoped candidates. Opaque/clean requests may still have `pathEvidence=none` and `queryEvidence=none`, but ad infrastructure should expose safe fields such as `hostAd`, `hostLoader`, `hostBidder`, `hostClick`, `clusterSeed`, and `clusterEpisodes`.
+5. Confirm ordinary `googletagmanager.com`, `static.cloudflareinsights.com`, `fonts.googleapis.com`, generic CDN scripts, and API requests show `hostEvidence=none`, `clusterSeed=false`, and no learned host-semantic rule merely from repetition.
+6. Trigger the previously observed hijacked popup/redirect. Confirm an unmatched destination near an active seeded cluster logs `intentMismatch=true` and navigation-cluster evidence. A deliberately clicked external link must remain intended and must not receive this evidence.
+7. Switch Adaptive to AUTO_SAFE and Blocker to ON.
+8. Reload. Expect `ADAPTIVE_PROMOTE`, followed on the next matching load by `ADAPTIVE_BLOCK` for the earliest qualified loader/infrastructure path, for example a stable third-party SCRIPT path rather than every rotating destination.
+9. Verify the subsequent advertising request chain materially shrinks, visible ads stop loading, unrelated popups/redirects are blocked when learned, and ArenaScan reading/search/navigation content remains functional.
+10. Only after a real `RESOURCE_BLOCK` or `ADAPTIVE_BLOCK`, recheck the existing v3.2 placeholder collapse. Do not interpret `DOM_CLEANUP removed=0` before a network block as a separate failure.
+
+Diagnostics must never contain full queries, query values, cookies, bodies, tracking identifiers, or arbitrary page/link text. JVM fixtures establish deterministic classification and safety only; the material network-chain reduction remains a physical acceptance requirement.
+
 ## Downloads v1 physical test
 
 1. Serve or open a safe page containing a small PDF, image, and ZIP/text link.

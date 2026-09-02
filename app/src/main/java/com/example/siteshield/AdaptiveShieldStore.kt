@@ -44,19 +44,22 @@ class SharedPreferencesAdaptiveStatePersistence private constructor(
 
     override fun load(): List<AdaptiveRecord> =
         AdaptiveStateCodec.decode(
-            preferences.getString(KEY_STATE_V4)
+            preferences.getString(KEY_STATE_V5)
+                ?: preferences.getString(KEY_STATE_V4)
                 ?: preferences.getString(KEY_STATE_V3)
                 ?: preferences.getString(KEY_STATE_LEGACY),
         )
 
     override fun save(records: List<AdaptiveRecord>) {
-        if (preferences.putString(KEY_STATE_V4, AdaptiveStateCodec.encode(records))) {
+        if (preferences.putString(KEY_STATE_V5, AdaptiveStateCodec.encode(records))) {
+            preferences.remove(KEY_STATE_V4)
             preferences.remove(KEY_STATE_V3)
             preferences.remove(KEY_STATE_LEGACY)
         }
     }
 
     internal companion object {
+        const val KEY_STATE_V5 = "adaptive_state_v5"
         const val KEY_STATE_V4 = "adaptive_state_v4"
         const val KEY_STATE_V3 = "adaptive_state_v3"
         const val KEY_STATE_LEGACY = "adaptive_state_v2"
@@ -64,9 +67,10 @@ class SharedPreferencesAdaptiveStatePersistence private constructor(
 }
 
 object AdaptiveStateCodec {
-    private const val VERSION = "v4"
-    private const val PREVIOUS_VERSION = "v3"
-    private const val LEGACY_VERSION = "v2"
+    private const val VERSION = "v5"
+    private const val V4_VERSION = "v4"
+    private const val V3_VERSION = "v3"
+    private const val V2_VERSION = "v2"
     private const val FIELD_SEPARATOR = '\t'
 
     fun encode(records: List<AdaptiveRecord>): String = buildString {
@@ -113,6 +117,17 @@ object AdaptiveStateCodec {
                     record.protocolEvidence.popupCount,
                     record.protocolEvidence.bidderCount,
                     record.protocolEvidence.clusterCount,
+                    record.hostAdEvidence.adLabelCount,
+                    record.hostAdEvidence.loaderRoleCount,
+                    record.hostAdEvidence.bidderRoleCount,
+                    record.hostAdEvidence.auctionRoleCount,
+                    record.hostAdEvidence.impressionRoleCount,
+                    record.hostAdEvidence.clickRoleCount,
+                    record.hostAdEvidence.popupRoleCount,
+                    record.hostAdEvidence.exchangeRoleCount,
+                    record.clusterSeedCount,
+                    record.clusterEpisodeCount,
+                    record.navigationClusterCorrelationCount,
                 ).joinToString(FIELD_SEPARATOR.toString()),
             )
         }
@@ -122,18 +137,44 @@ object AdaptiveStateCodec {
         if (serialized.isNullOrBlank()) return emptyList()
         val lines = serialized.lineSequence().toList()
         return when (lines.firstOrNull()) {
-            VERSION -> lines.drop(1).mapNotNull(::decodeV4Record)
-            PREVIOUS_VERSION -> lines.drop(1).mapNotNull(::decodeV3Record)
-            LEGACY_VERSION -> lines.drop(1).mapNotNull(::decodeV2Record)
+            VERSION -> lines.drop(1).mapNotNull(::decodeV5Record)
+            V4_VERSION -> lines.drop(1).mapNotNull(::decodeV4Record)
+            V3_VERSION -> lines.drop(1).mapNotNull(::decodeV3Record)
+            V2_VERSION -> lines.drop(1).mapNotNull(::decodeV2Record)
             else -> emptyList()
         }
     }
 
+    private fun decodeV5Record(line: String): AdaptiveRecord? = runCatching {
+        val fields = line.split(FIELD_SEPARATOR)
+        if (fields.size != 49) return null
+        val base = decodeV4Fields(fields) ?: return null
+        base.copy(
+            hostAdEvidence = AdaptiveHostAdEvidence(
+                adLabelCount = fields[38].toEvidenceCount() ?: return null,
+                loaderRoleCount = fields[39].toEvidenceCount() ?: return null,
+                bidderRoleCount = fields[40].toEvidenceCount() ?: return null,
+                auctionRoleCount = fields[41].toEvidenceCount() ?: return null,
+                impressionRoleCount = fields[42].toEvidenceCount() ?: return null,
+                clickRoleCount = fields[43].toEvidenceCount() ?: return null,
+                popupRoleCount = fields[44].toEvidenceCount() ?: return null,
+                exchangeRoleCount = fields[45].toEvidenceCount() ?: return null,
+            ),
+            clusterSeedCount = fields[46].toEvidenceCount() ?: return null,
+            clusterEpisodeCount = fields[47].toEvidenceCount() ?: return null,
+            navigationClusterCorrelationCount = fields[48].toEvidenceCount() ?: return null,
+        )
+    }.getOrNull()
+
     private fun decodeV4Record(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
         if (fields.size != 38) return null
+        decodeV4Fields(fields)
+    }.getOrNull()
+
+    private fun decodeV4Fields(fields: List<String>): AdaptiveRecord? {
         val base = decodeV3Fields(fields) ?: return null
-        base.copy(
+        return base.copy(
             intentMismatchCount = fields[29].toEvidenceCount() ?: return null,
             protocolEvidence = AdaptiveProtocolEvidence(
                 placementCount = fields[30].toEvidenceCount() ?: return null,
@@ -146,7 +187,7 @@ object AdaptiveStateCodec {
                 clusterCount = fields[37].toEvidenceCount() ?: return null,
             ),
         )
-    }.getOrNull()
+    }
 
     private fun decodeV3Record(line: String): AdaptiveRecord? = runCatching {
         val fields = line.split(FIELD_SEPARATOR)
@@ -240,6 +281,7 @@ class AdaptiveShieldController(
 ) : AutoCloseable {
     private data class RecentRequest(
         val scope: AdaptiveScope,
+        val documentKey: String,
         val host: String,
         val path: String,
         val blockedByStaticRule: Boolean,
@@ -257,7 +299,8 @@ class AdaptiveShieldController(
     private val persistLock = Any()
     private var scheduledPersist: ScheduledFuture<*>? = null
     private val recentRequests = ArrayDeque<RecentRequest>()
-    private val protocolCluster = AdaptiveRequestCluster()
+    private val protocolCluster = AdaptiveSeededAdCluster()
+    private val classifierDiagnosticKeys = linkedSetOf<String>()
 
     fun mode(): AdaptiveShieldMode = mode.get()
 
@@ -274,7 +317,12 @@ class AdaptiveShieldController(
         popup: Boolean,
         blockedBySourcePolicy: Boolean,
         intentMismatch: Boolean = false,
+        documentKey: String = "legacy",
     ) {
+        val nowMs = clock.nowMs()
+        val scope = adaptiveScope(profile, sourceUrl)
+        val clusterCorrelation = intentMismatch && scope != null &&
+            protocolCluster.hasActiveSeed(scope, documentKey, nowMs)
         val observation = AdaptiveObservationFactory.navigation(
             profile = profile,
             sourceUrl = sourceUrl,
@@ -282,8 +330,37 @@ class AdaptiveShieldController(
             popup = popup,
             blockedBySourcePolicy = blockedBySourcePolicy,
             intentMismatch = intentMismatch,
-            observedAtMs = clock.nowMs(),
+            adClusterCorrelation = clusterCorrelation,
+            observedAtMs = nowMs,
         ) ?: return
+        if (intentMismatch && scope != null) {
+            val behaviorSeed = protocolCluster.observe(
+                AdaptiveSeededAdCluster.Event(
+                    scope = scope,
+                    documentKey = documentKey,
+                    host = observation.host,
+                    path = "/",
+                    resourceKind = AdaptiveResourceKind.OTHER,
+                    hostEvidence = AdaptiveHostAdEvidence(),
+                    protocolEvidence = AdaptiveProtocolEvidence(),
+                    strongSeed = true,
+                    joinEligible = true,
+                    pathScoped = false,
+                    functionalConflict = false,
+                    observedAtMs = nowMs,
+                ),
+            )
+            recordClusterCredits(profile, sourceUrl, behaviorSeed.episodeCredits, nowMs)
+        }
+        if (clusterCorrelation) {
+            onEvent(
+                DebugEvent(
+                    DebugEventCategory.ADAPTIVE_OBSERVE,
+                    "Adaptive navigation joined ad cluster",
+                    "scope=${scope?.diagnosticName}, host=${observation.host}, intentMismatch=true, popup=$popup",
+                ),
+            )
+        }
         record(observation, profile.adaptivePolicy)
     }
 
@@ -293,6 +370,7 @@ class AdaptiveShieldController(
         requestUrl: String,
         blockedByStaticRule: Boolean,
         resourceKind: AdaptiveResourceKind,
+        documentKey: String = "legacy",
     ) {
         if (mode.get() == AdaptiveShieldMode.OFF || !profile.adaptivePolicy.enabled) return
         val scope = adaptiveScope(profile, pageUrl) ?: return
@@ -304,7 +382,7 @@ class AdaptiveShieldController(
             recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
             while (recentRequests.size >= MAX_RECENT_REQUESTS) recentRequests.removeFirst()
             recentRequests.addLast(
-                RecentRequest(scope, host, path, blockedByStaticRule, redirectEvidence, resourceKind, nowMs),
+                RecentRequest(scope, documentKey, host, path, blockedByStaticRule, redirectEvidence, resourceKind, nowMs),
             )
         }
         val observation = AdaptiveObservationFactory.request(
@@ -318,49 +396,158 @@ class AdaptiveShieldController(
             observedAtMs = nowMs,
         ) ?: return
         record(observation, profile.adaptivePolicy)
-        observeProtocol(profile, pageUrl, requestUrl, resourceKind, scope, host, nowMs)
+        observeNetworkEvidence(
+            profile, pageUrl, requestUrl, resourceKind, scope, documentKey, host,
+            blockedByStaticRule, redirectEvidence, nowMs,
+        )
     }
 
-    private fun observeProtocol(
+    private fun observeNetworkEvidence(
         profile: SiteProfile,
         pageUrl: String?,
         requestUrl: String,
         resourceKind: AdaptiveResourceKind,
         scope: AdaptiveScope,
+        documentKey: String,
         host: String,
+        blockedByStaticRule: Boolean,
+        redirectEvidence: Boolean,
         nowMs: Long,
     ) {
         val firstParty = host == scope.siteScope || profile.allowedHosts.any { it.matches(host) }
         if (firstParty) return
-        val classification = AdaptiveProtocolClassifier.classify(requestUrl, resourceKind) ?: return
-        val clusterCount = protocolCluster.observe(
-            AdaptiveRequestCluster.Event(scope, host, classification.evidence.categories, nowMs),
-        )
-        val evidence = classification.evidence.withCluster(clusterCount)
-        val conflict = profile.adaptivePolicy.protectedHosts.any { it.matches(host) } ||
-            isAdaptiveAccountNavigation("https://$host${classification.normalizedPath}")
-        fun protocolObservation(path: String?, pathScoped: Boolean) = AdaptiveProtocolObservation(
-            profileId = profile.id,
+        val path = sanitizeAdaptivePath(requestUrl.toUriOrNull()?.path)
+        val hostClassification = AdaptiveHostAdClassifier.classify(host, resourceKind)
+        val protocol = AdaptiveProtocolClassifier.classify(requestUrl, resourceKind)
+        val protocolStrong = protocol?.evidence?.let { evidence ->
+            evidence.popupCount > 0 || evidence.categories.size >= 2
+        } == true
+        val functionalConflict = profile.adaptivePolicy.protectedHosts.any { it.matches(host) } ||
+            isAdaptiveAccountNavigation("https://$host$path")
+        val pathScoped = resourceKind == AdaptiveResourceKind.SCRIPT &&
+            hostClassification.evidence.loaderRoleCount > 0 && path != "/"
+        val event = AdaptiveSeededAdCluster.Event(
+            scope = scope,
+            documentKey = documentKey,
             host = host,
             path = path,
-            pageType = profile.pageTypeForAdaptive(pageUrl),
-            observedAtMs = nowMs,
-            evidence = evidence,
-            thirdParty = true,
+            resourceKind = resourceKind,
+            hostEvidence = hostClassification.evidence,
+            protocolEvidence = protocol?.evidence ?: AdaptiveProtocolEvidence(),
+            strongSeed = hostClassification.strongSeed || protocolStrong || blockedByStaticRule || redirectEvidence,
+            joinEligible = hostClassification.joinEligible || protocol != null || blockedByStaticRule || redirectEvidence,
             pathScoped = pathScoped,
-            functionalConflict = conflict,
-            siteScope = scope.siteScope,
+            functionalConflict = functionalConflict,
+            observedAtMs = nowMs,
         )
-        record(protocolObservation(null, false), profile.adaptivePolicy)
-        if (classification.pathScoped && classification.normalizedPath != "/") {
-            record(protocolObservation(classification.normalizedPath, true), profile.adaptivePolicy)
+        val clusterResult = protocolCluster.observe(event)
+        logNetworkClassification(
+            scope, documentKey, host, resourceKind, hostClassification, protocol, clusterResult,
+        )
+        if (protocol != null) {
+            record(
+                AdaptiveProtocolObservation(
+                    profileId = profile.id,
+                    host = host,
+                    path = protocol.normalizedPath,
+                    pageType = profile.pageTypeForAdaptive(pageUrl),
+                    observedAtMs = nowMs,
+                    evidence = protocol.evidence,
+                    thirdParty = true,
+                    pathScoped = protocol.pathScoped,
+                    functionalConflict = functionalConflict,
+                    siteScope = scope.siteScope,
+                ),
+                profile.adaptivePolicy,
+            )
         }
+        recordClusterCredits(profile, pageUrl, clusterResult.episodeCredits, nowMs)
+    }
+
+    private fun recordClusterCredits(
+        profile: SiteProfile,
+        pageUrl: String?,
+        credits: List<AdaptiveSeededAdCluster.Event>,
+        nowMs: Long,
+    ) {
+        credits.forEach { credit ->
+            if (credit.hostEvidence.total > 0) {
+                record(
+                    AdaptiveHostAdObservation(
+                        profileId = profile.id,
+                        host = credit.host,
+                        path = credit.path.takeIf { credit.pathScoped },
+                        pageType = profile.pageTypeForAdaptive(pageUrl),
+                        observedAtMs = nowMs,
+                        evidence = credit.hostEvidence,
+                        resourceKind = credit.resourceKind,
+                        clusterSeed = credit.strongSeed,
+                        clusterEpisode = true,
+                        thirdParty = true,
+                        pathScoped = credit.pathScoped,
+                        functionalConflict = credit.functionalConflict,
+                        siteScope = credit.scope.siteScope,
+                    ),
+                    profile.adaptivePolicy,
+                )
+            }
+            if (credit.protocolEvidence.total > 0) {
+                record(
+                    AdaptiveProtocolObservation(
+                        profileId = profile.id,
+                        host = credit.host,
+                        path = credit.path.takeIf { credit.pathScoped },
+                        pageType = profile.pageTypeForAdaptive(pageUrl),
+                        observedAtMs = nowMs,
+                        evidence = AdaptiveProtocolEvidence(clusterCount = 1),
+                        thirdParty = true,
+                        pathScoped = credit.pathScoped,
+                        functionalConflict = credit.functionalConflict,
+                        siteScope = credit.scope.siteScope,
+                    ),
+                    profile.adaptivePolicy,
+                )
+            }
+        }
+    }
+
+    private fun logNetworkClassification(
+        scope: AdaptiveScope,
+        documentKey: String,
+        host: String,
+        resourceKind: AdaptiveResourceKind,
+        hostClassification: AdaptiveHostAdClassification,
+        protocol: AdaptiveProtocolClassification?,
+        cluster: AdaptiveSeededAdCluster.Result,
+    ) {
+        val key = "${scope.diagnosticName}|$documentKey|$host"
+        synchronized(classifierDiagnosticKeys) {
+            if (key in classifierDiagnosticKeys) return
+            while (classifierDiagnosticKeys.size >= MAX_CLASSIFIER_DIAGNOSTICS) {
+                classifierDiagnosticKeys.remove(classifierDiagnosticKeys.first())
+            }
+            classifierDiagnosticKeys += key
+        }
+        fun Set<AdaptiveProtocolCategory>?.safeNames(): String =
+            this?.joinToString("+") { it.name.lowercase() }.orEmpty().ifBlank { "none" }
+        onEvent(
+            DebugEvent(
+                DebugEventCategory.ADAPTIVE_OBSERVE,
+                "Adaptive network classifier",
+                "scope=${scope.diagnosticName}, host=$host, kind=$resourceKind, " +
+                    "hostEvidence=${hostClassification.evidence.diagnosticRoles()}, " +
+                    "pathEvidence=${protocol?.pathCategories.safeNames()}, " +
+                    "queryEvidence=${protocol?.queryCategories.safeNames()}, " +
+                    "clusterSeed=${cluster.clusterSeed}, clusterJoined=${cluster.joined}",
+            ),
+        )
     }
 
     fun observeDomAdEvidence(
         profile: SiteProfile,
         pageUrl: String?,
         reports: List<AdaptiveDomAdReport>,
+        documentKey: String = "legacy",
     ) {
         if (mode.get() == AdaptiveShieldMode.OFF || !profile.adaptivePolicy.enabled) return
         val scope = adaptiveScope(profile, pageUrl) ?: return
@@ -373,7 +560,7 @@ class AdaptiveShieldController(
             val structureReports = slotReports.filter { it.role == AdaptiveAdResourceRole.STRUCTURE }
             val loaderReports = slotReports.filter { it.role == AdaptiveAdResourceRole.LOADER }
             val correlatedFrames = slotReports.filter { it.role == AdaptiveAdResourceRole.IFRAME }
-                .mapNotNull { report -> recentRequestFor(scope, report, nowMs)?.let { report to it } }
+                .mapNotNull { report -> recentRequestFor(scope, documentKey, report, nowMs)?.let { report to it } }
 
             structureReports.forEach { report ->
                 onEvent(adaptiveSlotEvent(slotId, "structure"))
@@ -398,7 +585,7 @@ class AdaptiveShieldController(
                 recordCorrelatedReport(profile, pageUrl, scope, report, recent, nowMs)
             }
             loaderReports.forEach loader@{ report ->
-                val recent = recentRequestFor(scope, report, nowMs) ?: return@loader
+                val recent = recentRequestFor(scope, documentKey, report, nowMs) ?: return@loader
                 onEvent(adaptiveSlotEvent(slotId, "direct-loader"))
                 recordCorrelatedReport(profile, pageUrl, scope, report, recent, nowMs)
             }
@@ -410,6 +597,7 @@ class AdaptiveShieldController(
                     structureReports.lastOrNull() ?: return@slotGroup,
                     nowMs,
                     directLoaderKeys,
+                    documentKey,
                 )) {
                     is LoaderInference.Inferred -> {
                         onEvent(adaptiveSlotEvent(slotId, "inferred-loader"))
@@ -426,12 +614,13 @@ class AdaptiveShieldController(
 
     private fun recentRequestFor(
         scope: AdaptiveScope,
+        documentKey: String,
         report: AdaptiveDomAdReport,
         nowMs: Long,
     ): RecentRequest? = synchronized(recentRequests) {
         recentRequests.removeIf { nowMs - it.observedAtMs > DOM_CORRELATION_WINDOW_MS }
         recentRequests.lastOrNull {
-            it.scope == scope && it.host == report.host && it.path == report.path
+            it.scope == scope && it.documentKey == documentKey && it.host == report.host && it.path == report.path
         }
     }
 
@@ -476,12 +665,14 @@ class AdaptiveShieldController(
         structure: AdaptiveDomAdReport,
         nowMs: Long,
         excludedDirectLoaders: Set<String> = emptySet(),
+        documentKey: String = "legacy",
     ): LoaderInference {
         if (!structure.explicitAdSlot && !structure.sponsoredAttribution) return LoaderInference.None
         val scripts = synchronized(recentRequests) {
             recentRequests.filter {
                 nowMs - it.observedAtMs <= LOADER_INFERENCE_WINDOW_MS &&
                     it.scope == scope && it.resourceKind == AdaptiveResourceKind.SCRIPT &&
+                    it.documentKey == documentKey &&
                     it.host != scope.siteScope &&
                     "${it.host}${it.path}" !in excludedDirectLoaders &&
                     profile.adaptivePolicy.protectedHosts.none { pattern -> pattern.matches(it.host) }
@@ -639,6 +830,7 @@ class AdaptiveShieldController(
         const val MAX_DOM_REPORTS_PER_BATCH = 32
         const val DOM_CORRELATION_WINDOW_MS = 20_000L
         const val LOADER_INFERENCE_WINDOW_MS = 5_000L
+        const val MAX_CLASSIFIER_DIAGNOSTICS = 128
     }
 }
 
@@ -654,6 +846,12 @@ fun AdaptiveRecord.safeDiagnostic(): String =
         "protocolClick=${protocolEvidence.clickCount}, protocolPopup=${protocolEvidence.popupCount}, " +
         "protocolBidder=${protocolEvidence.bidderCount}, clusterEvents=${protocolEvidence.clusterCount}, " +
         "intentMismatch=$intentMismatchCount, popupEvidence=$popupCount, " +
+        "hostAd=${hostAdEvidence.adLabelCount}, hostLoader=${hostAdEvidence.loaderRoleCount}, " +
+        "hostBidder=${hostAdEvidence.bidderRoleCount}, hostAuction=${hostAdEvidence.auctionRoleCount}, " +
+        "hostImpression=${hostAdEvidence.impressionRoleCount}, hostClick=${hostAdEvidence.clickRoleCount}, " +
+        "hostPopup=${hostAdEvidence.popupRoleCount}, hostExchange=${hostAdEvidence.exchangeRoleCount}, " +
+        "clusterSeed=$clusterSeedCount, clusterEpisodes=$clusterEpisodeCount, " +
+        "navigationCluster=$navigationClusterCorrelationCount, " +
         "promotion=${promotionReason ?: "none"}, safety=${safetyConflict ?: "none"}, ruleId=$id"
 
 private fun SiteProfile.pageTypeForAdaptive(url: String?): PageType =

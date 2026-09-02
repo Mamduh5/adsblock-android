@@ -210,7 +210,7 @@ class AdaptiveShieldV31Test {
     }
 
     @Test
-    fun `preference migration reads legacy key then writes v4 before removing legacy`() {
+    fun `preference migration reads legacy key then writes v5 before removing legacy`() {
         val expected = persistedRecord()
         val store = FakePreferenceStore(
             mutableMapOf(
@@ -222,12 +222,12 @@ class AdaptiveShieldV31Test {
 
         assertEquals(listOf(expected), persistence.load())
         persistence.save(listOf(expected))
-        assertNotNull(store.values[SharedPreferencesAdaptiveStatePersistence.KEY_STATE_V4])
+        assertNotNull(store.values[SharedPreferencesAdaptiveStatePersistence.KEY_STATE_V5])
         assertNull(store.values[SharedPreferencesAdaptiveStatePersistence.KEY_STATE_LEGACY])
     }
 
     @Test
-    fun `failed v4 preference write preserves legacy state`() {
+    fun `failed v5 preference write preserves legacy state`() {
         val legacy = AdaptiveStateCodec.encode(listOf(persistedRecord()))
         val store = FakePreferenceStore(
             mutableMapOf(SharedPreferencesAdaptiveStatePersistence.KEY_STATE_LEGACY to legacy),

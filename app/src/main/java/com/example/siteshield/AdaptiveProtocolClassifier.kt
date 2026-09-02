@@ -38,7 +38,84 @@ data class AdaptiveProtocolClassification(
     val evidence: AdaptiveProtocolEvidence,
     val normalizedPath: String,
     val pathScoped: Boolean,
+    val pathCategories: Set<AdaptiveProtocolCategory> = emptySet(),
+    val queryCategories: Set<AdaptiveProtocolCategory> = emptySet(),
 )
+
+data class AdaptiveHostAdEvidence(
+    val adLabelCount: Int = 0,
+    val loaderRoleCount: Int = 0,
+    val bidderRoleCount: Int = 0,
+    val auctionRoleCount: Int = 0,
+    val impressionRoleCount: Int = 0,
+    val clickRoleCount: Int = 0,
+    val popupRoleCount: Int = 0,
+    val exchangeRoleCount: Int = 0,
+) {
+    val total: Int
+        get() = adLabelCount + loaderRoleCount + bidderRoleCount + auctionRoleCount +
+            impressionRoleCount + clickRoleCount + popupRoleCount + exchangeRoleCount
+
+    fun diagnosticRoles(): String = buildList {
+        if (adLabelCount > 0) add("ad-label")
+        if (loaderRoleCount > 0) add("loader")
+        if (bidderRoleCount > 0) add("bidder")
+        if (auctionRoleCount > 0) add("auction")
+        if (impressionRoleCount > 0) add("impression")
+        if (clickRoleCount > 0) add("click")
+        if (popupRoleCount > 0) add("popup")
+        if (exchangeRoleCount > 0) add("exchange")
+    }.joinToString("+").ifBlank { "none" }
+}
+
+data class AdaptiveHostAdClassification(
+    val evidence: AdaptiveHostAdEvidence,
+    val strongSeed: Boolean,
+    val joinEligible: Boolean,
+)
+
+/** Exact hostname-label classifier. It never substring-matches arbitrary words. */
+object AdaptiveHostAdClassifier {
+    private val strongAdLabels = setOf("ads", "advert", "adserver", "adservice", "adx", "pubadx")
+    private val bidderLabels = setOf("bid", "bidder", "prebid")
+    private val auctionLabels = setOf("auction", "rtb")
+    private val impressionLabels = setOf("imp", "impression")
+    private val exchangeLabels = setOf("ssp", "dsp", "exchange")
+    private val clickLabels = setOf("click", "onclick", "onclck", "clk")
+    private val popupLabels = setOf("pop", "popup", "popunder")
+
+    fun classify(host: String, resourceKind: AdaptiveResourceKind): AdaptiveHostAdClassification {
+        val normalized = host.normalizedHost().orEmpty()
+        val dotLabels = normalized.split('.').filter(String::isNotBlank)
+        val components = dotLabels.flatMap { it.split('-', '_') }.filter(String::isNotBlank).toSet()
+        val strongAd = components.any { it in strongAdLabels }
+        val weakAd = "ad" in components && !strongAd
+        val bidder = components.any { it in bidderLabels }
+        val auction = components.any { it in auctionLabels }
+        val impression = components.any { it in impressionLabels }
+        val exchange = components.any { it in exchangeLabels } || components.any { it in setOf("adx", "pubadx") }
+        val click = components.any { it in clickLabels } || dotLabels.any { label ->
+            label.startsWith("onclck") && label.removePrefix("onclck").matches(Regex("[a-z0-9]{1,12}"))
+        }
+        val popup = components.any { it in popupLabels }
+        val adLabel = when { strongAd -> 2; weakAd -> 1; else -> 0 }
+        val roleEvidence = adLabel > 0 || bidder || auction || impression || exchange || click || popup
+        val scriptLoader = resourceKind == AdaptiveResourceKind.SCRIPT && roleEvidence
+        val evidence = AdaptiveHostAdEvidence(
+            adLabelCount = adLabel,
+            loaderRoleCount = if (scriptLoader) 1 else 0,
+            bidderRoleCount = if (bidder) 1 else 0,
+            auctionRoleCount = if (auction) 1 else 0,
+            impressionRoleCount = if (impression) 1 else 0,
+            clickRoleCount = if (click) 1 else 0,
+            popupRoleCount = if (popup) 1 else 0,
+            exchangeRoleCount = if (exchange) 1 else 0,
+        )
+        val strongSeed = strongAd || bidder || auction || exchange || click || popup ||
+            (resourceKind == AdaptiveResourceKind.SCRIPT && weakAd)
+        return AdaptiveHostAdClassification(evidence, strongSeed, roleEvidence)
+    }
+}
 
 /** Pure, identifier-free classifier. Raw values are inspected only for a small predefined category set. */
 object AdaptiveProtocolClassifier {
@@ -91,20 +168,22 @@ object AdaptiveProtocolClassifier {
         }
         val uri = url.toUriOrNull() ?: return null
         val normalizedPath = sanitizeAdaptivePath(uri.path)
-        val categories = linkedSetOf<AdaptiveProtocolCategory>()
+        val pathEvidence = linkedSetOf<AdaptiveProtocolCategory>()
+        val queryEvidence = linkedSetOf<AdaptiveProtocolCategory>()
         val pathTokens = normalizedPath.lowercase(Locale.US).split(Regex("[^a-z0-9]+"))
-        pathTokens.mapNotNullTo(categories) { pathCategories[it] }
+        pathTokens.mapNotNullTo(pathEvidence) { pathCategories[it] }
         uri.rawQuery.orEmpty().split('&').take(MAX_QUERY_PARAMETERS).forEach { pair ->
             val separator = pair.indexOf('=')
             val rawName = if (separator >= 0) pair.substring(0, separator) else pair
             val name = decode(rawName).lowercase(Locale.US).take(MAX_TOKEN_LENGTH)
-            parameterCategories[name]?.let(categories::add)
+            parameterCategories[name]?.let(queryEvidence::add)
             if (name in categoricalParameters && separator >= 0) {
                 val value = decode(pair.substring(separator + 1)).lowercase(Locale.US).take(MAX_TOKEN_LENGTH)
-                if (value in popupValues) categories += AdaptiveProtocolCategory.POPUP
-                if (value in auctionValues) categories += AdaptiveProtocolCategory.AUCTION
+                if (value in popupValues) queryEvidence += AdaptiveProtocolCategory.POPUP
+                if (value in auctionValues) queryEvidence += AdaptiveProtocolCategory.AUCTION
             }
         }
+        val categories = pathEvidence + queryEvidence
         if (categories.isEmpty()) return null
         val evidence = AdaptiveProtocolEvidence(
             placementCount = AdaptiveProtocolCategory.PLACEMENT.presentIn(categories),
@@ -119,6 +198,8 @@ object AdaptiveProtocolClassifier {
             evidence = evidence,
             normalizedPath = normalizedPath,
             pathScoped = pathTokens.any { it in pathCategories },
+            pathCategories = pathEvidence,
+            queryCategories = queryEvidence,
         )
     }
 
@@ -133,34 +214,63 @@ object AdaptiveProtocolClassifier {
     private const val MAX_TOKEN_LENGTH = 48
 }
 
-class AdaptiveRequestCluster(
-    private val windowMs: Long = 10_000L,
+class AdaptiveSeededAdCluster(
+    private val windowMs: Long = 8_000L,
     private val maxEvents: Int = 64,
 ) {
     data class Event(
         val scope: AdaptiveScope,
+        val documentKey: String,
         val host: String,
-        val categories: Set<AdaptiveProtocolCategory>,
+        val path: String,
+        val resourceKind: AdaptiveResourceKind,
+        val hostEvidence: AdaptiveHostAdEvidence,
+        val protocolEvidence: AdaptiveProtocolEvidence,
+        val strongSeed: Boolean,
+        val joinEligible: Boolean,
+        val pathScoped: Boolean,
+        val functionalConflict: Boolean,
         val observedAtMs: Long,
     )
 
+    data class Result(
+        val clusterSeed: Boolean,
+        val joined: Boolean,
+        val episodeCredits: List<Event>,
+    )
+
     private val events = ArrayDeque<Event>()
+    private val credited = linkedSetOf<String>()
 
     @Synchronized
-    fun observe(event: Event): Int {
+    fun observe(event: Event): Result {
         events.removeIf { event.observedAtMs - it.observedAtMs > windowMs }
+        val liveDocuments = events.mapTo(hashSetOf()) { "${it.scope.diagnosticName}|${it.documentKey}" }
+        credited.removeIf { key -> liveDocuments.none { prefix -> key.startsWith("$prefix|") } }
         while (events.size >= maxEvents) events.removeFirst()
-        events.addLast(event)
-        val related = events.filter { it.scope == event.scope && it.host == event.host }
-        val categories = related.flatMapTo(linkedSetOf()) { it.categories }
-        val hasEntry = AdaptiveProtocolCategory.PLACEMENT in categories
-        val hasExchange = AdaptiveProtocolCategory.AUCTION in categories || AdaptiveProtocolCategory.BIDDER in categories
-        val hasOutcome = categories.any {
-            it in setOf(AdaptiveProtocolCategory.IMPRESSION, AdaptiveProtocolCategory.CREATIVE,
-                AdaptiveProtocolCategory.CLICK, AdaptiveProtocolCategory.POPUP)
+        if (event.strongSeed || event.joinEligible) events.addLast(event)
+        val related = events.filter { it.scope == event.scope && it.documentKey == event.documentKey }
+        val hasSeed = related.any(Event::strongSeed)
+        val participants = related.filter { it.strongSeed || it.joinEligible }
+        val crossHost = participants.map(Event::host).distinct().size >= 2
+        val credits = if (hasSeed && crossHost) participants.filter { participant ->
+            val key = creditKey(participant)
+            if (key in credited) false else credited.add(key)
+        } else {
+            emptyList()
         }
-        return if (related.size >= 3 && hasEntry && hasExchange && hasOutcome) 1 else 0
+        return Result(event.strongSeed, hasSeed && crossHost && (event.strongSeed || event.joinEligible), credits)
     }
 
     @Synchronized fun size(): Int = events.size
+
+    @Synchronized
+    fun hasActiveSeed(scope: AdaptiveScope, documentKey: String, nowMs: Long): Boolean {
+        events.removeIf { nowMs - it.observedAtMs > windowMs }
+        return events.any { it.scope == scope && it.documentKey == documentKey && it.strongSeed }
+    }
+
+    private fun creditKey(event: Event): String =
+        "${event.scope.diagnosticName}|${event.documentKey}|${event.host}|" +
+            if (event.pathScoped) event.path else "host"
 }

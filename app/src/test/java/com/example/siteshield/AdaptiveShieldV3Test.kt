@@ -274,23 +274,34 @@ class AdaptiveShieldV3Test {
     }
 
     @Test
-    fun `v4 records round trip and corrupt evidence fails safely`() {
+    fun `v5 records round trip and corrupt evidence fails safely`() {
         val record = learnedLoaderEngine().snapshot(10).single()
         val decoded = AdaptiveStateCodec.decode(AdaptiveStateCodec.encode(listOf(record)))
         assertEquals(listOf(record), decoded)
-        assertTrue(AdaptiveStateCodec.decode("v3\nbroken\tevidence").isEmpty())
+        assertTrue(AdaptiveStateCodec.decode("v5\nbroken\tevidence").isEmpty())
     }
 
     @Test
     fun `v3 migration preserves learned state without inventing protocol evidence`() {
         val record = learnedLoaderEngine().snapshot(10).single()
         val encodedV4 = AdaptiveStateCodec.encode(listOf(record)).lineSequence().toList()
-        val v3Fields = encodedV4[1].split('\t').dropLast(9).joinToString("\t")
+        val v3Fields = encodedV4[1].split('\t').take(29).joinToString("\t")
         val migrated = AdaptiveStateCodec.decode("v3\n$v3Fields").single()
         assertEquals(record.adEvidence, migrated.adEvidence)
         assertEquals(record.state, migrated.state)
         assertEquals(0, migrated.protocolEvidence.total)
         assertEquals(0, migrated.intentMismatchCount)
+    }
+
+    @Test
+    fun `v4 migration does not invent host or cluster evidence`() {
+        val record = learnedLoaderEngine().snapshot(10).single()
+        val encodedV5 = AdaptiveStateCodec.encode(listOf(record)).lineSequence().toList()
+        val v4Fields = encodedV5[1].split('\t').take(38).joinToString("\t")
+        val migrated = AdaptiveStateCodec.decode("v4\n$v4Fields").single()
+        assertEquals(record.protocolEvidence, migrated.protocolEvidence)
+        assertEquals(0, migrated.hostAdEvidence.total)
+        assertEquals(0, migrated.clusterEpisodeCount)
     }
 
     @Test

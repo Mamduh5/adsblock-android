@@ -25,6 +25,7 @@ object GenericWebProfile {
                 AdaptiveCandidateType.THIRD_PARTY_REQUEST_HOST,
                 AdaptiveCandidateType.AD_RESOURCE,
                 AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE,
+                AdaptiveCandidateType.NETWORK_HOST_AD_EVIDENCE,
             ),
         ),
         suspiciousCookieKeyPatterns = listOf(suspiciousKeyRegex()),

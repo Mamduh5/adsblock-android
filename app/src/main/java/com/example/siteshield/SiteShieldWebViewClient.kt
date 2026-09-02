@@ -104,14 +104,17 @@ class SiteShieldWebViewClient(
 
         return when (decision) {
             is BlockDecision.Block -> {
-                adaptiveShieldController.observeNavigation(
-                    profile = sourceContext.profile,
-                    sourceUrl = sourceContext.url,
-                    targetUrl = targetUrl,
-                    popup = true,
-                    blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
-                    intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
-                )
+                if (!intent.trusted) {
+                    adaptiveShieldController.observeNavigation(
+                        profile = sourceContext.profile,
+                        sourceUrl = sourceContext.url,
+                        targetUrl = targetUrl,
+                        popup = true,
+                        blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
+                        intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
+                        documentKey = navigationIntentChannelToken(),
+                    )
+                }
                 onEvent(
                     DebugEvent(
                         category = DebugEventCategory.POPUP_BLOCK,
@@ -134,14 +137,17 @@ class SiteShieldWebViewClient(
                 false
             }
             BlockDecision.Allow -> {
-                adaptiveShieldController.observeNavigation(
-                    profile = sourceContext.profile,
-                    sourceUrl = sourceContext.url,
-                    targetUrl = targetUrl,
-                    popup = true,
-                    blockedBySourcePolicy = false,
-                    intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
-                )
+                if (!intent.trusted) {
+                    adaptiveShieldController.observeNavigation(
+                        profile = sourceContext.profile,
+                        sourceUrl = sourceContext.url,
+                        targetUrl = targetUrl,
+                        popup = true,
+                        blockedBySourcePolicy = false,
+                        intentMismatch = intent.category == NavigationIntentCategory.CLICK_HIJACK_SUSPECTED,
+                        documentKey = navigationIntentChannelToken(),
+                    )
+                }
                 val adaptiveDecision = adaptiveShieldController.decideNavigation(
                     profile = sourceContext.profile,
                     sourceUrl = sourceContext.url,
@@ -201,6 +207,7 @@ class SiteShieldWebViewClient(
                     popup = false,
                     blockedBySourcePolicy = false,
                     intentMismatch = intentMismatch,
+                    documentKey = navigationIntentChannelToken(),
                 )
             }
             return false
@@ -216,6 +223,7 @@ class SiteShieldWebViewClient(
                         popup = false,
                         blockedBySourcePolicy = decision.reason == BlockReason.OFFSITE_MAIN_FRAME,
                         intentMismatch = intentMismatch,
+                        documentKey = navigationIntentChannelToken(),
                     )
                 }
                 val pageType = blockerEngine.classifyPageType(profile, currentPageUrl)
@@ -247,6 +255,7 @@ class SiteShieldWebViewClient(
                 popup = false,
                 blockedBySourcePolicy = false,
                 intentMismatch = intentMismatch,
+                documentKey = navigationIntentChannelToken(),
             )
             val adaptiveDecision = adaptiveShieldController.decideNavigation(
                 profile = adaptiveProfile,
@@ -320,6 +329,7 @@ class SiteShieldWebViewClient(
                 requestUrl = requestUrl,
                 blockedByStaticRule = decision is BlockDecision.Block,
                 resourceKind = resourceKind,
+                documentKey = navigationIntentChannelToken(),
             )
             onAdaptiveResourceActivity()
         }

@@ -1171,6 +1171,15 @@ class MainActivity : Activity() {
                     "Protocol bidder: ${record.protocolEvidence.bidderCount}  " +
                     "cluster: ${record.protocolEvidence.clusterCount}  " +
                     "intent mismatch: ${record.intentMismatchCount}\n" +
+                    "Host ad: ${record.hostAdEvidence.adLabelCount}  " +
+                    "loader: ${record.hostAdEvidence.loaderRoleCount}  " +
+                    "bidder: ${record.hostAdEvidence.bidderRoleCount}\n" +
+                    "Host auction: ${record.hostAdEvidence.auctionRoleCount}  " +
+                    "impression: ${record.hostAdEvidence.impressionRoleCount}  " +
+                    "click: ${record.hostAdEvidence.clickRoleCount}\n" +
+                    "Host popup: ${record.hostAdEvidence.popupRoleCount}  " +
+                    "exchange: ${record.hostAdEvidence.exchangeRoleCount}  " +
+                    "cluster seed: ${record.clusterSeedCount}  episodes: ${record.clusterEpisodeCount}\n" +
                     "Promotion: ${record.promotionReason ?: "not eligible"}  " +
                     "Safety: ${record.safetyConflict ?: "none"}\n" +
                     "Path: ${record.path ?: "host only"}\nRule: ${record.id}",
@@ -1194,6 +1203,8 @@ class MainActivity : Activity() {
             AdaptiveCandidateType.AD_RESOURCE -> if (record.pathScoped) "Ad resource path" else "Ad resource host"
             AdaptiveCandidateType.NETWORK_PROTOCOL_AD_EVIDENCE ->
                 if (record.pathScoped) "Ad protocol path" else "Ad protocol host"
+            AdaptiveCandidateType.NETWORK_HOST_AD_EVIDENCE ->
+                if (record.pathScoped) "Host-semantic ad loader" else "Host-semantic ad infrastructure"
             AdaptiveCandidateType.DOM_STRUCTURE -> "DOM candidate (review only)"
         }
         return "${record.state}: ${record.host}\n$kind · Seen ${record.occurrenceCount} · Confidence ${record.confidence}"
@@ -1601,7 +1612,9 @@ class MainActivity : Activity() {
                 recordEvent(adaptiveObserverEvent("observer-installed", scope, reason))
             }
             if (drain.reports.isNotEmpty()) {
-                adaptiveShieldController.observeDomAdEvidence(profile, pageUrl, drain.reports)
+                adaptiveShieldController.observeDomAdEvidence(
+                    profile, pageUrl, drain.reports, currentRuntime.client.navigationIntentChannelToken(),
+                )
                 recordEvent(adaptiveObserverEvent("observer-drain reports=${drain.reports.size}", scope, reason))
             }
             if (drain.overflowCount > 0) {

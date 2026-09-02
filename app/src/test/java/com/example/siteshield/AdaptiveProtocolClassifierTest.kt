@@ -50,28 +50,33 @@ class AdaptiveProtocolClassifierTest {
         assertNull(AdaptiveProtocolClassifier.classify("https://cdn.example/imp?zoneid=1", AdaptiveResourceKind.IMAGE))
     }
 
-    @Test fun `cluster is diverse host scoped expiring and bounded`() {
+    @Test fun `seeded cluster is cross-host expiring and bounded`() {
         val scope = AdaptiveScope("generic-web", "reader.example")
-        val cluster = AdaptiveRequestCluster(windowMs = 100, maxEvents = 4)
-        fun event(host: String, at: Long, vararg categories: AdaptiveProtocolCategory) =
-            cluster.observe(AdaptiveRequestCluster.Event(scope, host, categories.toSet(), at))
+        val cluster = AdaptiveSeededAdCluster(windowMs = 100, maxEvents = 4)
+        fun event(host: String, at: Long, seed: Boolean, eligible: Boolean) = cluster.observe(
+            AdaptiveSeededAdCluster.Event(
+                scope, "doc", host, "/", AdaptiveResourceKind.OTHER, AdaptiveHostAdEvidence(),
+                AdaptiveProtocolEvidence(), seed, eligible, false, false, at,
+            ),
+        )
 
-        assertEquals(0, event("ads.example", 0, AdaptiveProtocolCategory.PLACEMENT))
-        assertEquals(0, event("ads.example", 1, AdaptiveProtocolCategory.AUCTION))
-        assertEquals(0, event("other.example", 2, AdaptiveProtocolCategory.IMPRESSION))
-        assertEquals(1, event("ads.example", 3, AdaptiveProtocolCategory.IMPRESSION))
-        assertEquals(0, event("ads.example", 200, AdaptiveProtocolCategory.IMPRESSION))
-        repeat(8) { event("analytics.example", 201L + it, AdaptiveProtocolCategory.IMPRESSION) }
+        assertTrue(event("ads.example", 0, true, true).episodeCredits.isEmpty())
+        assertEquals(2, event("bid.example", 1, true, true).episodeCredits.size)
+        assertTrue(event("other.example", 2, false, false).episodeCredits.isEmpty())
+        assertFalse(cluster.hasActiveSeed(scope, "doc", 200))
+        repeat(8) { event("role-$it.example", 201L + it, true, true) }
         assertEquals(4, cluster.size())
     }
 
-    @Test fun `repetition without auction composition does not form cluster`() {
+    @Test fun `repetition without independent evidence does not form cluster`() {
         val scope = AdaptiveScope("generic-web", "reader.example")
-        val cluster = AdaptiveRequestCluster()
+        val cluster = AdaptiveSeededAdCluster()
         repeat(10) {
-            assertEquals(0, cluster.observe(AdaptiveRequestCluster.Event(
-                scope, "analytics.example", setOf(AdaptiveProtocolCategory.IMPRESSION), it.toLong(),
-            )))
+            val result = cluster.observe(AdaptiveSeededAdCluster.Event(
+                scope, "doc", "analytics.example", "/event", AdaptiveResourceKind.SCRIPT,
+                AdaptiveHostAdEvidence(), AdaptiveProtocolEvidence(), false, false, false, false, it.toLong(),
+            ))
+            assertTrue(result.episodeCredits.isEmpty())
         }
     }
 
@@ -79,7 +84,6 @@ class AdaptiveProtocolClassifierTest {
         val profile = GenericWebProfile.profile
         val scope = AdaptiveScope(profile.id, "fixture.example")
         val engine = AdaptiveShieldEngine()
-        val cluster = AdaptiveRequestCluster()
         val urls = listOf(
             "https://exchange.example/loader.js?placement_id=1&ssp=x",
             "https://exchange.example/bid?zoneid=2&auction=abc",
@@ -90,9 +94,7 @@ class AdaptiveProtocolClassifierTest {
         )
         urls.forEachIndexed { index, url ->
             val classified = AdaptiveProtocolClassifier.classify(url, AdaptiveResourceKind.SCRIPT)!!
-            val clustered = cluster.observe(AdaptiveRequestCluster.Event(
-                scope, "exchange.example", classified.evidence.categories, index.toLong(),
-            ))
+            val clustered = if (index >= 2) 1 else 0
             engine.observe(
                 AdaptiveProtocolObservation(
                     profileId = profile.id,
